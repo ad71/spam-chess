@@ -9,6 +9,31 @@ import { useRouter } from "next/navigation";
 
 const CLIENT_COOLDOWN_MS = 250;
 
+// Material Values
+const PIECE_VALUES: Record<string, number> = {
+  p: 1,
+  n: 3,
+  b: 3,
+  r: 5,
+  q: 9,
+  k: 0,
+};
+
+function getMaterialBalance(fen: string) {
+  const boardPart = fen.split(" ")[0];
+  let white = 0;
+  let black = 0;
+
+  for (const char of boardPart) {
+    if (PIECE_VALUES[char.toLowerCase()]) {
+      const val = PIECE_VALUES[char.toLowerCase()];
+      if (char === char.toUpperCase()) white += val;
+      else black += val;
+    }
+  }
+  return { white, black };
+}
+
 export default function GamePage({
   params,
 }: {
@@ -23,7 +48,11 @@ export default function GamePage({
   const [serverFen, setServerFen] = useState("start");
   const [players, setPlayers] = useState<Player[]>([]);
   const [winner, setWinner] = useState<Team | null>(null);
+
   const [moveHistory, setMoveHistory] = useState<MoveLog[]>([]);
+  const [materialHistory, setMaterialHistory] = useState<
+    { w: number; b: number }[]
+  >([{ w: 39, b: 39 }]);
 
   // --- Loading/Error ---
   const [loading, setLoading] = useState(true);
@@ -41,11 +70,10 @@ export default function GamePage({
   const [copied, setCopied] = useState(false);
   const [isCoolingDown, setIsCoolingDown] = useState(false);
 
-  // Refs for scrolling and focus
+  // Refs
   const inputRef = useRef<HTMLInputElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll logs
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [moveHistory]);
@@ -64,6 +92,12 @@ export default function GamePage({
         setFen(data.fen);
         setServerFen(data.fen);
         setPlayers(data.players || []);
+
+        const mat = getMaterialBalance(data.fen);
+        setMaterialHistory([
+          { w: 39, b: 39 },
+          { w: mat.white, b: mat.black },
+        ]);
 
         if (data.status === "finished" && data.winner) {
           setWinner(data.winner as Team);
@@ -102,7 +136,6 @@ export default function GamePage({
         setGame(newGame);
         setFen(data.fen);
 
-        // Add to Log
         setMoveHistory((prev) => [
           ...prev,
           {
@@ -113,6 +146,9 @@ export default function GamePage({
             timestamp: Date.now(),
           },
         ]);
+
+        const mat = getMaterialBalance(data.fen);
+        setMaterialHistory((prev) => [...prev, { w: mat.white, b: mat.black }]);
       }
     );
 
@@ -129,7 +165,8 @@ export default function GamePage({
       setFen(data.fen);
       setServerFen(data.fen);
       setGame(new Chess(data.fen));
-      setMoveHistory([]); // Clear logs on reset
+      setMoveHistory([]);
+      setMaterialHistory([{ w: 39, b: 39 }]);
     });
 
     return () => {
@@ -239,6 +276,81 @@ export default function GamePage({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // --- Graph Component ---
+  const MaterialGraph = () => {
+    const dataPoints = materialHistory;
+    if (dataPoints.length < 1) return null;
+
+    const points = dataPoints.map((pt, index) => {
+      const total = pt.w + pt.b;
+      if (total === 0) return [index, 50];
+
+      const whiteRatio = pt.w / total;
+
+      // FIXED LOGIC:
+      // y=0 is Top (SVG origin).
+      // We want White (Top) to grow down as ratio increases.
+      // So y coord of line = ratio * 100.
+      // Example: Ratio 0.5 -> y=50 (Middle).
+      // Example: Ratio 1.0 (All White) -> y=100 (Bottom). White fills whole box.
+      // Wait, standard fill draws from 0,0.
+      // Path M 0,0 ... L 100,0 closes at top.
+      // So this shape is the TOP shape (White).
+      // So if White has 100%, we want the shape to go to y=100.
+      const y = whiteRatio * 100;
+
+      const x = (index / (dataPoints.length - 1 || 1)) * 100;
+      return [x, y];
+    });
+
+    const pathD = `
+        M 0,0 
+        ${points.map((p) => `L ${p[0]},${p[1]}`).join(" ")} 
+        L 100,0 Z
+    `;
+
+    const current = materialHistory[materialHistory.length - 1];
+
+    return (
+      <div className="relative aspect-square w-full bg-[#111] border border-slate-800 overflow-hidden group rounded shadow-inner">
+        {/* Center Line (Equilibrium) */}
+        <div className="absolute top-1/2 left-0 right-0 h-px bg-white/20 z-0 border-t border-dashed border-white/20"></div>
+
+        <svg
+          viewBox="0 0 100 100"
+          preserveAspectRatio="none"
+          className="absolute inset-0 w-full h-full z-10"
+        >
+          {/* White Advantage Area (Solid White) */}
+          <path d={pathD} fill="#ffffff" />
+
+          {/* The Frontier Line */}
+          <path
+            d={`M 0,${points[0][1]} ${points
+              .map((p) => `L ${p[0]},${p[1]}`)
+              .join(" ")}`}
+            fill="none"
+            stroke="#111"
+            strokeWidth="0.5"
+          />
+        </svg>
+
+        {/* Stats Overlay */}
+        <div className="absolute bottom-2 left-2 flex flex-col font-mono text-[10px] font-bold z-20">
+          <div className="bg-white text-black px-2 py-1 rounded-sm mb-1 shadow-lg w-fit border border-black">
+            W: {current.w}
+          </div>
+          <div className="bg-black text-white border border-white/50 px-2 py-1 rounded-sm shadow-lg w-fit">
+            B: {current.b}
+          </div>
+        </div>
+
+        {/* Grid overlay for tech feel */}
+        <div className="absolute inset-0 bg-[linear-gradient(rgba(0,0,0,0.1)_1px,transparent_1px),linear-gradient(90deg,rgba(0,0,0,0.1)_1px,transparent_1px)] bg-size-[20px_20px] pointer-events-none mix-blend-overlay"></div>
+      </div>
+    );
+  };
+
   // --- RENDER ---
 
   if (loading)
@@ -257,7 +369,6 @@ export default function GamePage({
   const whitePlayers = players.filter((p) => p.team === "w");
   const blackPlayers = players.filter((p) => p.team === "b");
 
-  // --- LOBBY VIEW ---
   if (!isJoined) {
     return (
       <>
@@ -364,21 +475,19 @@ export default function GamePage({
     <>
       <div className="scanline-overlay"></div>
       <div className="flex flex-col md:flex-row h-screen bg-[#020617] text-white font-mono overflow-hidden relative">
-        {/* BACKGROUND GLOW */}
         <div
           className={`fixed inset-0 pointer-events-none transition-opacity duration-1000 z-0 ${
             myTeam === "w"
-              ? "bg-[radial-gradient(circle_at_20%_50%,_rgba(255,255,255,0.03),_transparent_70%)]"
-              : "bg-[radial-gradient(circle_at_20%_50%,_rgba(255,0,0,0.03),_transparent_70%)]"
+              ? "bg-[radial-gradient(circle_at_20%_50%,rgba(255,255,255,0.03),transparent_70%)]"
+              : "bg-[radial-gradient(circle_at_20%_50%,rgba(255,0,0,0.03),transparent_70%)]"
           }`}
         ></div>
 
-        {/* VICTORY MODAL */}
         {winner && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md animate-fade-in">
             <div className="glass-panel p-12 rounded-2xl text-center shadow-2xl border-t border-white/10 max-w-2xl w-full mx-4 relative overflow-hidden">
               <div
-                className={`absolute top-0 left-1/2 -translate-x-1/2 w-full h-1 bg-gradient-to-r from-transparent via-${
+                className={`absolute top-0 left-1/2 -translate-x-1/2 w-full h-1 bg-linear-to-r from-transparent via-${
                   winner === "w" ? "white" : "red-500"
                 } to-transparent opacity-50`}
               ></div>
@@ -398,15 +507,14 @@ export default function GamePage({
                 onClick={handleRematch}
                 className="group relative inline-flex items-center justify-center px-8 py-4 font-bold text-white transition-all duration-200 bg-emerald-600 font-mono rounded-lg hover:bg-emerald-500"
               >
-                REMATCH <span className="text-xl ml-2">↻</span>
+                INITIALIZE REMATCH <span className="text-xl ml-2">↻</span>
               </button>
             </div>
           </div>
         )}
 
-        {/* LEFT PANEL: BOARD (Flex Grow) */}
+        {/* LEFT PANEL */}
         <div className="flex-1 flex flex-col relative z-10 p-6 md:p-10 h-full">
-          {/* HEADER */}
           <div className="flex justify-between items-start mb-6">
             <div>
               <h1 className="text-xl font-bold text-slate-400 tracking-tight flex items-center gap-2">
@@ -428,7 +536,6 @@ export default function GamePage({
             </div>
           </div>
 
-          {/* BOARD CONTAINER - Takes remaining height */}
           <div className="flex-1 flex items-center justify-center min-h-0">
             <div
               className={`aspect-square h-full max-h-full rounded-lg overflow-hidden shadow-2xl border-[3px] transition-all duration-500 ${
@@ -448,7 +555,6 @@ export default function GamePage({
             </div>
           </div>
 
-          {/* INPUT BAR */}
           <div className="mt-6 w-full max-w-3xl mx-auto">
             <form onSubmit={handleMove} className="flex gap-3 relative">
               <div className="flex-1 relative group">
@@ -492,14 +598,18 @@ export default function GamePage({
           </div>
         </div>
 
-        {/* RIGHT PANEL: SIDEBAR (Fixed Width) */}
-        <div className="w-full md:w-80 lg:w-96 border-l border-slate-800 bg-slate-950/80 backdrop-blur-sm flex flex-col z-20">
-          {/* SIDEBAR HEADER */}
+        {/* RIGHT PANEL: SIDEBAR */}
+        <div className="w-full md:w-96 lg:w-[450px] border-l border-slate-800 bg-slate-950/80 backdrop-blur-sm flex flex-col z-20">
           <div className="p-4 border-b border-slate-800 bg-slate-900/50">
-            <h3 className="text-xs font-bold text-slate-400 tracking-widest uppercase mb-4">
-              Tactical Feed
-            </h3>
-            <div className="flex gap-2">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xs font-bold text-slate-400 tracking-widest uppercase">
+                Advantage Graph
+              </h3>
+            </div>
+
+            <MaterialGraph />
+
+            <div className="flex gap-2 mt-4">
               <div className="flex-1 bg-slate-100 rounded p-2 flex justify-between items-center">
                 <span className="text-xs font-bold text-slate-900">WHITE</span>
                 <span className="text-xs font-bold bg-slate-300 text-slate-800 px-1.5 rounded">
@@ -515,7 +625,6 @@ export default function GamePage({
             </div>
           </div>
 
-          {/* LOG FEED */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-sm relative">
             {moveHistory.length === 0 && (
               <div className="text-center text-slate-600 mt-10 text-xs italic">
@@ -526,32 +635,36 @@ export default function GamePage({
             {moveHistory.map((log) => (
               <div
                 key={log.id}
-                className="animate-fade-in flex gap-3 items-start group"
+                className="animate-fade-in flex gap-3 items-start group hover:bg-white/5 p-1 rounded transition-colors"
               >
-                <span className="text-slate-600 text-[10px] mt-0.5 min-w-[30px]">
+                <span className="text-slate-600 text-[10px] mt-0.5 min-w-[30px] font-mono">
                   {new Date(log.timestamp).toLocaleTimeString([], {
                     hour12: false,
                     minute: "2-digit",
                     second: "2-digit",
                   })}
                 </span>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${
-                        log.team === "w" ? "bg-white" : "bg-red-500"
-                      }`}
-                    ></span>
-                    <span
-                      className={`font-bold ${
-                        log.team === "w" ? "text-slate-200" : "text-red-400"
-                      }`}
-                    >
-                      {log.username}
-                    </span>
-                  </div>
-                  <div className="text-emerald-500 font-bold ml-3.5">
-                    {log.move}
+                <div className="flex-1">
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          log.team === "w"
+                            ? "bg-white shadow-[0_0_5px_white]"
+                            : "bg-red-500 shadow-[0_0_5px_red]"
+                        }`}
+                      ></span>
+                      <span
+                        className={`font-bold tracking-tight ${
+                          log.team === "w" ? "text-slate-200" : "text-red-400"
+                        }`}
+                      >
+                        {log.username}
+                      </span>
+                    </div>
+                    <div className="text-emerald-400 font-black font-mono tracking-widest">
+                      {log.move}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -559,9 +672,8 @@ export default function GamePage({
             <div ref={logEndRef} />
           </div>
 
-          {/* SIDEBAR FOOTER */}
-          <div className="p-3 border-t border-slate-800 text-[10px] text-slate-600 text-center">
-            SECURE CONNECTION ESTABLISHED
+          <div className="p-3 border-t border-slate-800 text-[10px] text-slate-600 text-center uppercase tracking-widest">
+            End to End Encrypted
           </div>
         </div>
 

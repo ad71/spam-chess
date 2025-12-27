@@ -36,7 +36,7 @@ export default function LandingPage() {
       <div className="scanline-overlay"></div>
       <div className="flex flex-col items-center justify-center min-h-screen bg-[#020617] text-white p-4 font-mono relative overflow-hidden">
         {/* Background Ambient Glow */}
-        <div className="fixed inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_50%,_rgba(16,185,129,0.05),_transparent_60%)]"></div>
+        <div className="fixed inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_50%,rgba(16,185,129,0.05),transparent_60%)]"></div>
 
         <div className="glass-panel p-10 rounded-2xl w-full max-w-md shadow-2xl relative z-10 animate-fade-in border border-slate-800">
           {/* LOGO SECTION */}
@@ -45,7 +45,7 @@ export default function LandingPage() {
               <span className="text-7xl md:text-8xl font-black text-white tracking-tighter drop-shadow-[0_0_15px_rgba(255,255,255,0.1)]">
                 SPAM
               </span>
-              <span className="text-7xl md:text-8xl font-black text-transparent bg-clip-text bg-gradient-to-b from-emerald-400 to-emerald-700 tracking-tighter drop-shadow-[0_0_15px_rgba(16,185,129,0.3)]">
+              <span className="text-7xl md:text-8xl font-black text-transparent bg-clip-text bg-linear-to-b from-emerald-400 to-emerald-700 tracking-tighter drop-shadow-[0_0_15px_rgba(16,185,129,0.3)]">
                 CHESS
               </span>
             </h1>
@@ -62,7 +62,7 @@ export default function LandingPage() {
               disabled={isLoading}
               className="group relative w-full overflow-hidden rounded-lg bg-emerald-600 p-4 text-white shadow-lg transition-all hover:bg-emerald-500 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
             >
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700"></div>
+              <div className="absolute inset-0 bg-linear-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700"></div>
               <span className="relative font-black text-xl tracking-widest flex items-center justify-center gap-2">
                 {isLoading ? "INITIALIZING..." : "NEW GAME"}
               </span>
@@ -70,11 +70,11 @@ export default function LandingPage() {
 
             {/* DIVIDER */}
             <div className="relative flex py-2 items-center opacity-50">
-              <div className="flex-grow border-t border-slate-600"></div>
-              <span className="flex-shrink-0 mx-4 text-slate-500 text-[10px] tracking-widest">
+              <div className="grow border-t border-slate-600"></div>
+              <span className="shrink-0 mx-4 text-slate-500 text-[10px] tracking-widest">
                 OR JOIN EXISTING
               </span>
-              <div className="flex-grow border-t border-slate-600"></div>
+              <div className="grow border-t border-slate-600"></div>
             </div>
 
             {/* JOIN FORM */}
