@@ -4,7 +4,6 @@ import { Redis } from "@upstash/redis";
 import { Chess } from "chess.js";
 import { MoveRequest, MoveResponse } from "@/app/types";
 
-// Initialize Infrastructure
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL!,
   token: process.env.UPSTASH_REDIS_REST_TOKEN!,
@@ -18,61 +17,53 @@ const pusher = new Pusher({
   useTLS: true,
 });
 
-const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-
 export async function POST(req: Request) {
   try {
     const body: MoveRequest = await req.json();
-    const { move, team, username } = body;
+    const { move, team, username, gameId } = body;
 
-    // 1. Validation: Ensure we have necessary data
-    if (!move || !team || !username) {
+    if (!move || !team || !username || !gameId) {
       return NextResponse.json(
         { success: false, message: "Missing required fields" },
         { status: 400 }
       );
     }
 
-    // 2. Fetch State
-    const currentFen =
-      (await redis.get<string>("CHESS_GAME_FEN")) || STARTING_FEN;
+    const redisKey = `GAME:${gameId}:FEN`;
+    const currentFen = await redis.get<string>(redisKey);
 
-    // 3. THE CHAOS HACK: Force the board to accept a move from the requesting team
-    // regardless of whose turn it actually is.
+    if (!currentFen) {
+      return NextResponse.json(
+        { success: false, message: "Game not found" },
+        { status: 404 }
+      );
+    }
+
+    // --- PHASE 1 LOGIC (Simplified for now, will enhance later) ---
+    // Force turn hack (Still needed until Phase 3 Refactor)
     const fenParts = currentFen.split(" ");
-
-    // fenParts[1] is the active color ('w' or 'b')
-    // We overwrite it with the requester's team.
     fenParts[1] = team;
-
-    // Reconstruct FEN with the forced turn
     const forcedFen = fenParts.join(" ");
 
     const game = new Chess(forcedFen);
 
-    // 4. Attempt the move
     try {
       const moveResult = game.move(move);
-      // Note: game.move() validates that the piece belongs to 'team'
-      // and the move is geometrically legal.
-
       if (!moveResult) throw new Error("Null move result");
     } catch (e) {
-      // Move failed (illegal, or blocked)
       return NextResponse.json(
         { success: false, message: "Invalid move" },
         { status: 400 }
       );
     }
 
-    // 5. Success! Get the new state
     const newFen = game.fen();
 
-    // 6. Commit to Database
-    await redis.set("CHESS_GAME_FEN", newFen);
+    // Update DB
+    await redis.set(redisKey, newFen);
 
-    // 7. Broadcast to the world
-    await pusher.trigger("spam-chess", "update-board", {
+    // Broadcast to specific game channel: 'game-{gameId}'
+    await pusher.trigger(`game-${gameId}`, "update-board", {
       fen: newFen,
       lastMove: move,
       lastMover: username,
