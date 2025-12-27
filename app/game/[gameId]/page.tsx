@@ -19,6 +19,7 @@ export default function GamePage({
   const [game, setGame] = useState(new Chess());
   const [fen, setFen] = useState("start");
   const [players, setPlayers] = useState<Player[]>([]);
+  const [winner, setWinner] = useState<Team | null>(null);
 
   // --- Loading/Error ---
   const [loading, setLoading] = useState(true);
@@ -50,8 +51,15 @@ export default function GamePage({
         setGame(newGame);
         setFen(data.fen);
         setPlayers(data.players || []);
+
+        if (data.status === "finished" && data.winner) {
+          setWinner(data.winner);
+          setStatus("Game Over");
+        } else {
+          setStatus("Live");
+        }
+
         setLoading(false);
-        setStatus("Live");
       } catch (err) {
         console.error(err);
         setError("Could not load game.");
@@ -62,7 +70,7 @@ export default function GamePage({
     fetchGameState();
   }, [gameId]);
 
-  // 2. Pusher Subscription (Always active to see lobby updates)
+  // 2. Pusher Subscription
   useEffect(() => {
     if (loading || error) return;
 
@@ -77,9 +85,13 @@ export default function GamePage({
     channel.bind(
       "update-board",
       (data: { fen: string; lastMove: string; lastMover: string }) => {
-        const newGame = new Chess(data.fen);
-        setGame(newGame);
-        setFen(data.fen);
+        // If game is already over locally, ignore updates
+        setFen((current) => {
+          // A little trick to access state in callback if needed, but simple set is fine
+          const newGame = new Chess(data.fen);
+          setGame(newGame);
+          return data.fen;
+        });
         setLastMover(data.lastMover);
       }
     );
@@ -87,6 +99,13 @@ export default function GamePage({
     // Player Joins
     channel.bind("player-joined", (newPlayer: Player) => {
       setPlayers((prev) => [...prev, newPlayer]);
+    });
+
+    // Game Over
+    channel.bind("game-over", (data: { winner: Team; lastMover: string }) => {
+      setWinner(data.winner);
+      setLastMover(data.lastMover);
+      setStatus("Game Over");
     });
 
     return () => {
@@ -122,7 +141,6 @@ export default function GamePage({
         return;
       }
 
-      // Success
       setMyUsername(data.player.username);
       setMyTeam(data.player.team);
       setIsJoined(true);
@@ -135,11 +153,12 @@ export default function GamePage({
 
   const handleMove = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!moveInput.trim() || !myTeam || !myUsername) return;
+    if (!moveInput.trim() || !myTeam || !myUsername || winner) return;
 
     const moveCommand = moveInput.trim();
 
-    // Optimistic
+    // Optimistic Update
+    // We attempt to visualize it locally immediately
     const gameCopy = new Chess(fen);
     const fenParts = gameCopy.fen().split(" ");
     fenParts[1] = myTeam;
@@ -182,14 +201,13 @@ export default function GamePage({
   if (error)
     return <div className="text-red-500 p-10 font-mono text-xl">{error}</div>;
 
-  // VIEW: LOBBY (If not joined)
+  // LOBBY VIEW
   if (!isJoined) {
     const whitePlayers = players.filter((p) => p.team === "w");
     const blackPlayers = players.filter((p) => p.team === "b");
 
     return (
       <div className="min-h-screen bg-slate-950 text-white font-mono p-4 flex flex-col items-center">
-        {/* Lobby Header */}
         <div className="w-full max-w-4xl flex justify-between items-center mb-8 border-b border-slate-800 pb-4">
           <div>
             <h1 className="text-3xl font-bold text-emerald-500">
@@ -205,7 +223,6 @@ export default function GamePage({
           </button>
         </div>
 
-        {/* Name Input */}
         <div className="w-full max-w-md mb-8">
           <label className="block text-xs font-bold mb-2 text-slate-400 uppercase tracking-widest">
             Identity
@@ -219,9 +236,8 @@ export default function GamePage({
           />
         </div>
 
-        {/* Teams Display */}
         <div className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-2 gap-8">
-          {/* TEAM WHITE */}
+          {/* WHITE TEAM */}
           <div className="bg-slate-200 text-slate-900 rounded-xl p-6 flex flex-col shadow-xl">
             <h2 className="text-2xl font-bold mb-4 border-b border-slate-300 pb-2">
               TEAM WHITE
@@ -239,14 +255,14 @@ export default function GamePage({
             </div>
             <button
               onClick={() => handleJoin("w")}
-              disabled={isJoining}
+              disabled={isJoining || !!winner}
               className="w-full bg-white border-2 border-slate-300 hover:border-slate-900 py-4 rounded-lg font-bold text-lg transition-all active:scale-95 disabled:opacity-50"
             >
               JOIN WHITE
             </button>
           </div>
 
-          {/* TEAM BLACK */}
+          {/* BLACK TEAM */}
           <div className="bg-slate-900 text-slate-200 border border-slate-700 rounded-xl p-6 flex flex-col shadow-xl">
             <h2 className="text-2xl font-bold mb-4 border-b border-slate-700 pb-2">
               TEAM BLACK
@@ -264,7 +280,7 @@ export default function GamePage({
             </div>
             <button
               onClick={() => handleJoin("b")}
-              disabled={isJoining}
+              disabled={isJoining || !!winner}
               className="w-full bg-slate-800 border-2 border-slate-700 hover:border-white py-4 rounded-lg font-bold text-lg transition-all active:scale-95 disabled:opacity-50"
             >
               JOIN BLACK
@@ -275,9 +291,37 @@ export default function GamePage({
     );
   }
 
-  // VIEW: GAME BOARD (If joined)
+  // GAME VIEW
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-white p-4 font-mono">
+      {/* VICTORY OVERLAY */}
+      {winner && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-in fade-in duration-500">
+          <div className="text-center">
+            <h1
+              className={`text-6xl md:text-8xl font-black mb-4 ${
+                winner === "w"
+                  ? "text-white drop-shadow-[0_0_15px_rgba(255,255,255,0.5)]"
+                  : "text-red-500 drop-shadow-[0_0_15px_rgba(255,0,0,0.5)]"
+              }`}
+            >
+              {winner === "w" ? "WHITE" : "BLACK"} WINS
+            </h1>
+            <p className="text-slate-400 text-xl tracking-widest uppercase">
+              Regicide Complete
+            </p>
+            <div className="mt-8">
+              <button
+                onClick={() => router.push("/")}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-3 rounded font-bold"
+              >
+                RETURN TO BASE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* HEADER */}
       <div className="w-full max-w-[500px] flex justify-between items-end mb-4">
         <div>
@@ -318,9 +362,10 @@ export default function GamePage({
             customDarkSquareStyle={{ backgroundColor: "#334155" }}
             customLightSquareStyle={{ backgroundColor: "#94a3b8" }}
             animationDuration={200}
+            arePiecesDraggable={false} // Force keyboard/input use for speed? Or allow drag? Let's keep default.
           />
 
-          {lastMover && (
+          {lastMover && !winner && (
             <div className="absolute top-2 right-2 bg-black/80 backdrop-blur text-xs px-3 py-1 rounded-full text-emerald-400 border border-emerald-900/50 z-10 shadow-lg">
               {lastMover} moved
             </div>
@@ -331,15 +376,17 @@ export default function GamePage({
         <form onSubmit={handleMove} className="mt-6 flex gap-2">
           <input
             type="text"
-            className="flex-1 bg-slate-900 border border-slate-700 rounded px-4 py-4 text-xl font-mono text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 transition-all"
+            className="flex-1 bg-slate-900 border border-slate-700 rounded px-4 py-4 text-xl font-mono text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 transition-all disabled:opacity-50"
             placeholder={`Move (e.g. ${myTeam === "w" ? "e4" : "e5"})`}
             value={moveInput}
             onChange={(e) => setMoveInput(e.target.value)}
             autoFocus
+            disabled={!!winner}
           />
           <button
             type="submit"
-            className={`font-bold py-2 px-6 rounded text-xl transition-all active:scale-95 ${
+            disabled={!!winner}
+            className={`font-bold py-2 px-6 rounded text-xl transition-all active:scale-95 disabled:opacity-50 ${
               myTeam === "w"
                 ? "bg-slate-200 text-slate-900 hover:bg-white"
                 : "bg-slate-800 text-white hover:bg-slate-700 border border-slate-600"

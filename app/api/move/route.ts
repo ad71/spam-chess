@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import Pusher from "pusher";
 import { Redis } from "@upstash/redis";
-import { Chess } from "chess.js";
-import { MoveRequest, MoveResponse } from "@/app/types";
+import { Chess, Square } from "chess.js";
+import { MoveRequest, MoveResponse, Team } from "@/app/types";
 
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL!,
@@ -17,6 +17,20 @@ const pusher = new Pusher({
   useTLS: true,
 });
 
+// Helper to find a king's position
+function findKing(game: Chess, color: Team): Square | undefined {
+  const board = game.board();
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const piece = board[r][c];
+      if (piece && piece.type === "k" && piece.color === color) {
+        return piece.square;
+      }
+    }
+  }
+  return undefined;
+}
+
 export async function POST(req: Request) {
   try {
     const body: MoveRequest = await req.json();
@@ -24,60 +38,147 @@ export async function POST(req: Request) {
 
     if (!move || !team || !username || !gameId) {
       return NextResponse.json(
-        { success: false, message: "Missing required fields" },
+        { success: false, message: "Missing fields" },
         { status: 400 }
       );
     }
 
-    const redisKey = `GAME:${gameId}:FEN`;
-    const currentFen = await redis.get<string>(redisKey);
+    // 1. ATOMIC LOCK
+    const lockKey = `GAME:${gameId}:LOCK`;
+    const acquiredLock = await redis.set(lockKey, "1", { nx: true, px: 500 });
 
-    if (!currentFen) {
+    if (!acquiredLock) {
       return NextResponse.json(
-        { success: false, message: "Game not found" },
-        { status: 404 }
+        { success: false, message: "Rate limited / Race condition" },
+        { status: 429 }
       );
     }
-
-    // --- PHASE 1 LOGIC (Simplified for now, will enhance later) ---
-    // Force turn hack (Still needed until Phase 3 Refactor)
-    const fenParts = currentFen.split(" ");
-    fenParts[1] = team;
-    const forcedFen = fenParts.join(" ");
-
-    const game = new Chess(forcedFen);
 
     try {
-      const moveResult = game.move(move);
-      if (!moveResult) throw new Error("Null move result");
-    } catch (e) {
-      return NextResponse.json(
-        { success: false, message: "Invalid move" },
-        { status: 400 }
-      );
+      // 2. FETCH STATE
+      const fenKey = `GAME:${gameId}:FEN`;
+      const metaKey = `GAME:${gameId}:META`;
+
+      // Fetch FEN and Status
+      const [currentFen, meta] = await Promise.all([
+        redis.get<string>(fenKey),
+        redis.hgetall<{ status: string; winner: string }>(metaKey),
+      ]);
+
+      if (!currentFen || !meta) {
+        throw new Error("Game not found");
+      }
+
+      if (meta.status === "finished") {
+        return NextResponse.json(
+          { success: false, message: "Game is over" },
+          { status: 400 }
+        );
+      }
+
+      // 3. GAME LOGIC ENGINE
+      // HACK: Force the turn to the requesting team
+      const fenParts = currentFen.split(" ");
+      fenParts[1] = team; // Set active color
+      const forcedFen = fenParts.join(" ");
+
+      const game = new Chess(forcedFen);
+
+      // 3a. PARSE MOVE
+      let moveDetails;
+      try {
+        const myKingPos = findKing(game, team);
+
+        // Try standard parsing
+        const standardMoves = game.moves({ verbose: true });
+        moveDetails = standardMoves.find(
+          (m) => m.san === move || m.lan === move
+        );
+
+        // If standard parsing fails (likely due to check), try "Shadow Board" parsing
+        if (!moveDetails && myKingPos) {
+          const kingPiece = game.remove(myKingPos);
+
+          // Now check moves again without our King
+          const looseMoves = game.moves({ verbose: true });
+          moveDetails = looseMoves.find(
+            (m) => m.san === move || m.lan === move
+          );
+
+          // Put King back immediately
+          if (kingPiece) game.put(kingPiece, myKingPos);
+        }
+
+        if (!moveDetails) {
+          throw new Error("Invalid move geometry");
+        }
+
+        // 3b. REGICIDE CHECK (Winning Condition)
+        const targetSquare = game.get(moveDetails.to);
+
+        if (
+          targetSquare &&
+          targetSquare.type === "k" &&
+          targetSquare.color !== team
+        ) {
+          // GAME OVER!
+          await redis.hset(metaKey, { status: "finished", winner: team });
+
+          await pusher.trigger(`game-${gameId}`, "game-over", {
+            winner: team,
+            lastMover: username,
+          });
+
+          return NextResponse.json({
+            success: true,
+            isGameOver: true,
+            winner: team,
+          });
+        }
+
+        // 3c. APPLY MOVE
+        if (myKingPos && moveDetails.piece !== "k") {
+          // To ensure the move is executed even if in check:
+          const king = game.remove(myKingPos);
+          game.move(move); // Execute move
+
+          // FIXED: Ensure king exists before putting back
+          if (king) {
+            game.put(king, myKingPos);
+          }
+        } else {
+          // King is moving, or standard move is fine
+          game.move(move);
+        }
+      } catch (e) {
+        return NextResponse.json(
+          { success: false, message: "Invalid move" },
+          { status: 400 }
+        );
+      }
+
+      const newFen = game.fen();
+
+      // 4. COMMIT STATE
+      await redis.set(fenKey, newFen);
+
+      // 5. BROADCAST
+      await pusher.trigger(`game-${gameId}`, "update-board", {
+        fen: newFen,
+        lastMove: move,
+        lastMover: username,
+        team: team,
+      });
+
+      return NextResponse.json({ success: true, fen: newFen });
+    } finally {
+      // 6. RELEASE LOCK
+      await redis.del(lockKey);
     }
-
-    const newFen = game.fen();
-
-    // Update DB
-    await redis.set(redisKey, newFen);
-
-    // Broadcast to specific game channel: 'game-{gameId}'
-    await pusher.trigger(`game-${gameId}`, "update-board", {
-      fen: newFen,
-      lastMove: move,
-      lastMover: username,
-      team: team,
-    });
-
-    return NextResponse.json<MoveResponse>({
-      success: true,
-      fen: newFen,
-    });
   } catch (error) {
     console.error("Move Error:", error);
     return NextResponse.json(
-      { success: false, message: "Internal Server Error" },
+      { success: false, message: "Server Error" },
       { status: 500 }
     );
   }

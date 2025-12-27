@@ -7,12 +7,12 @@ export interface Player {
   joinedAt: number;
 }
 
-// The shape of the data we expect when fetching a game
 export interface GameInfo {
   gameId: string;
   fen: string;
   status: GameStatus;
-  players: Player[]; // Added players list
+  winner?: Team | null; // New field
+  players: Player[];
   lastMove?: string;
   lastMover?: string;
 }
@@ -34,4 +34,6 @@ export interface MoveResponse {
   success: boolean;
   fen?: string;
   message?: string;
+  isGameOver?: boolean;
+  winner?: Team;
 }
