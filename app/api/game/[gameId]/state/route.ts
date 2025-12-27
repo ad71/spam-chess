@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { Redis } from "@upstash/redis";
-import { GameInfo, GameStatus } from "@/app/types";
+import { GameInfo, GameStatus, Player } from "@/app/types";
 
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL!,
@@ -13,10 +13,11 @@ export async function GET(
 ) {
   const { gameId } = await params;
 
-  // Fetch FEN and Meta in parallel
-  const [fen, meta] = await Promise.all([
+  // Fetch FEN, Meta, and Players in parallel
+  const [fen, meta, playersRaw] = await Promise.all([
     redis.get<string>(`GAME:${gameId}:FEN`),
     redis.hgetall<{ status: GameStatus }>(`GAME:${gameId}:META`),
+    redis.lrange<string>(`GAME:${gameId}:PLAYERS`, 0, -1),
   ]);
 
   if (!fen || !meta) {
@@ -26,10 +27,14 @@ export async function GET(
     );
   }
 
+  // Parse players from JSON strings
+  const players: Player[] = (playersRaw || []).map((p) => JSON.parse(p));
+
   const response: GameInfo = {
     gameId,
     fen,
     status: meta.status || "waiting",
+    players,
   };
 
   return NextResponse.json(response);
