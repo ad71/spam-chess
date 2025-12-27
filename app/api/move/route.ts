@@ -17,6 +17,9 @@ const pusher = new Pusher({
   useTLS: true,
 });
 
+// CONSTANTS
+const COOLDOWN_MS = 200; // Time between moves per player
+
 // Helper to find a king's position
 function findKing(game: Chess, color: Team): Square | undefined {
   const board = game.board();
@@ -43,23 +46,35 @@ export async function POST(req: Request) {
       );
     }
 
-    // 1. ATOMIC LOCK
+    // 1. RATE LIMITING (COOLDOWN)
+    // We check if this specific user is cooling down in this specific game.
+    const cooldownKey = `GAME:${gameId}:COOLDOWN:${username}`;
+    const isCoolingDown = await redis.exists(cooldownKey);
+
+    if (isCoolingDown) {
+      return NextResponse.json(
+        { success: false, message: "Cooldown active" },
+        { status: 429 }
+      );
+    }
+
+    // 2. ATOMIC LOCK
+    // Prevents race conditions on the board state
     const lockKey = `GAME:${gameId}:LOCK`;
     const acquiredLock = await redis.set(lockKey, "1", { nx: true, px: 500 });
 
     if (!acquiredLock) {
       return NextResponse.json(
-        { success: false, message: "Rate limited / Race condition" },
+        { success: false, message: "Server busy, try again" },
         { status: 429 }
       );
     }
 
     try {
-      // 2. FETCH STATE
+      // 3. FETCH STATE
       const fenKey = `GAME:${gameId}:FEN`;
       const metaKey = `GAME:${gameId}:META`;
 
-      // Fetch FEN and Status
       const [currentFen, meta] = await Promise.all([
         redis.get<string>(fenKey),
         redis.hgetall<{ status: string; winner: string }>(metaKey),
@@ -76,59 +91,48 @@ export async function POST(req: Request) {
         );
       }
 
-      // 3. GAME LOGIC ENGINE
-      // HACK: Force the turn to the requesting team
+      // 4. GAME LOGIC ENGINE
+      // Force turn hack for 'spam' logic
       const fenParts = currentFen.split(" ");
-      fenParts[1] = team; // Set active color
+      fenParts[1] = team;
       const forcedFen = fenParts.join(" ");
 
       const game = new Chess(forcedFen);
 
-      // 3a. PARSE MOVE
       let moveDetails;
       try {
         const myKingPos = findKing(game, team);
 
-        // Try standard parsing
+        // Standard parse
         const standardMoves = game.moves({ verbose: true });
         moveDetails = standardMoves.find(
           (m) => m.san === move || m.lan === move
         );
 
-        // If standard parsing fails (likely due to check), try "Shadow Board" parsing
+        // Shadow Board parse (bypass check)
         if (!moveDetails && myKingPos) {
           const kingPiece = game.remove(myKingPos);
-
-          // Now check moves again without our King
           const looseMoves = game.moves({ verbose: true });
           moveDetails = looseMoves.find(
             (m) => m.san === move || m.lan === move
           );
-
-          // Put King back immediately
           if (kingPiece) game.put(kingPiece, myKingPos);
         }
 
-        if (!moveDetails) {
-          throw new Error("Invalid move geometry");
-        }
+        if (!moveDetails) throw new Error("Invalid move");
 
-        // 3b. REGICIDE CHECK (Winning Condition)
+        // Regicide Check
         const targetSquare = game.get(moveDetails.to);
-
         if (
           targetSquare &&
           targetSquare.type === "k" &&
           targetSquare.color !== team
         ) {
-          // GAME OVER!
           await redis.hset(metaKey, { status: "finished", winner: team });
-
           await pusher.trigger(`game-${gameId}`, "game-over", {
             winner: team,
             lastMover: username,
           });
-
           return NextResponse.json({
             success: true,
             isGameOver: true,
@@ -136,33 +140,41 @@ export async function POST(req: Request) {
           });
         }
 
-        // 3c. APPLY MOVE
+        // Apply Move
         if (myKingPos && moveDetails.piece !== "k") {
-          // To ensure the move is executed even if in check:
           const king = game.remove(myKingPos);
-          game.move(move); // Execute move
-
-          // FIXED: Ensure king exists before putting back
-          if (king) {
-            game.put(king, myKingPos);
-          }
+          game.move(move);
+          if (king) game.put(king, myKingPos);
         } else {
-          // King is moving, or standard move is fine
           game.move(move);
         }
       } catch (e) {
         return NextResponse.json(
-          { success: false, message: "Invalid move" },
+          { success: false, message: "Invalid move geometry" },
           { status: 400 }
         );
       }
 
       const newFen = game.fen();
 
-      // 4. COMMIT STATE
-      await redis.set(fenKey, newFen);
+      // 5. UPDATE STATE, SET COOLDOWN, AND EXTEND TTL
+      const GAME_TTL = 86400; // 24 Hours
+      const pipeline = redis.pipeline();
 
-      // 5. BROADCAST
+      // Update the Board
+      pipeline.set(fenKey, newFen);
+
+      // Set the Cooldown (Short term)
+      pipeline.set(cooldownKey, "1", { px: COOLDOWN_MS });
+
+      // Extend Life of Game Keys (Long term)
+      pipeline.expire(fenKey, GAME_TTL);
+      pipeline.expire(metaKey, GAME_TTL);
+      pipeline.expire(`GAME:${gameId}:PLAYERS`, GAME_TTL);
+
+      await pipeline.exec();
+
+      // 6. BROADCAST
       await pusher.trigger(`game-${gameId}`, "update-board", {
         fen: newFen,
         lastMove: move,
@@ -172,7 +184,6 @@ export async function POST(req: Request) {
 
       return NextResponse.json({ success: true, fen: newFen });
     } finally {
-      // 6. RELEASE LOCK
       await redis.del(lockKey);
     }
   } catch (error) {
