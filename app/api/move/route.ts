@@ -38,27 +38,40 @@ function findKing(game: Chess, color: Team): Square | undefined {
   return undefined;
 }
 
-// Helper: Fuzzy Match logic to handle Promotions
-// User input: "f7e8" (cleaned)
-// Engine LAN: "f7e8q" (cleaned)
-// We want this to match.
+// ENHANCED MATCHER: Handles "Bfg7" (redundant source file) and "f7e8" (missing promotion char)
 function isMoveMatch(userInputClean: string, move: Move) {
   const lan = cleanMove(move.lan);
   const san = cleanMove(move.san);
 
-  // 1. Exact matches
+  // 1. Standard Exact Matches
   if (lan === userInputClean) return true;
   if (san === userInputClean) return true;
 
-  // 2. Promotion fuzzy match (User didn't type 'q', engine expects it)
-  // If move is a promotion, and user input is exactly the from-to coordinates
+  // 2. Promotion Fuzzy Match (e.g. user typed "f7e8", engine wants "f7e8q")
   if (move.promotion) {
-    // LAN check: "f7e8q" starts with "f7e8"
     if (lan.startsWith(userInputClean) && userInputClean.length === 4)
       return true;
-    // SAN check: "fxe8q" starts with "fxe8"
     if (san.startsWith(userInputClean) && userInputClean.length >= 3)
       return true;
+  }
+
+  // 3. Permissive Disambiguation (e.g. user typed "bfg7", engine wants "bg7")
+  // We check if the input is a valid combination of Piece + From + To
+  const p = move.piece;
+  if (p !== "p") {
+    // Pawns don't use piece letters in standard notation
+    const f = move.from[0]; // file (a-h)
+    const r = move.from[1]; // rank (1-8)
+    const t = move.to; // square (e.g. g7)
+
+    // Allow: Bfg7, B8g7, Bf8g7
+    const candidates = [
+      p + f + t, // Piece + File + To ("bfg7")
+      p + r + t, // Piece + Rank + To ("b8g7")
+      p + f + r + t, // Piece + Square + To ("bf8g7")
+    ];
+
+    if (candidates.includes(userInputClean)) return true;
   }
 
   return false;
@@ -126,39 +139,30 @@ export async function POST(req: Request) {
       let isRegicide = false;
 
       if (enemyKingPos) {
-        // 1. Determine if we need to remove our own king (Shadow Board)
-        // Only remove my King if the PIECE MOVING is NOT my King.
-        // If my King attacks their King, he must be on the board!
-        // We guess if the king is moving by checking if the input matches the king's square.
-
-        // Rough check: does input start with king pos? (e.g. "e1e2")
-        const isKingProbablyMoving =
-          myKingPos && cleanedInput.startsWith(myKingPos);
+        // Determine if we need to remove our own king (Shadow Board)
+        // Only remove my King if input doesn't look like a King move to avoid ambiguity
+        const isKingMove =
+          cleanedInput.startsWith("k") ||
+          (myKingPos && cleanedInput.startsWith(myKingPos));
 
         let myKingPiece;
-        if (myKingPos && !isKingProbablyMoving) {
+        if (myKingPos && !isKingMove) {
           myKingPiece = game.remove(myKingPos);
         }
 
-        // 2. Swap Enemy King for Decoy (Queen)
+        // Swap Enemy King for Decoy (Queen)
         const enemyKingPiece = game.remove(enemyKingPos);
         game.put({ type: "q", color: team === "w" ? "b" : "w" }, enemyKingPos);
 
-        // 3. Generate moves against the Decoy
         const killMoves = game.moves({ verbose: true });
-
         const killShot = killMoves.find(
-          (m) =>
-            isMoveMatch(cleanedInput, m) && // Use fuzzy matcher
-            m.to === enemyKingPos
+          (m) => isMoveMatch(cleanedInput, m) && m.to === enemyKingPos
         );
 
-        if (killShot) {
-          isRegicide = true;
-        }
+        if (killShot) isRegicide = true;
 
-        // 4. Cleanup
-        game.remove(enemyKingPos); // Remove decoy
+        // Cleanup
+        game.remove(enemyKingPos);
         if (enemyKingPiece) game.put(enemyKingPiece, enemyKingPos);
         if (myKingPiece && myKingPos) game.put(myKingPiece, myKingPos);
       }
@@ -179,8 +183,6 @@ export async function POST(req: Request) {
       // --- PHASE B: STANDARD MOVE VALIDATION ---
 
       let moveDetails: Move | undefined;
-
-      // Try Standard
       const standardMoves = game.moves({ verbose: true });
       moveDetails = standardMoves.find((m) => isMoveMatch(cleanedInput, m));
 
@@ -188,9 +190,7 @@ export async function POST(req: Request) {
       if (!moveDetails && myKingPos) {
         const kingPiece = game.remove(myKingPos);
         const looseMoves = game.moves({ verbose: true });
-
         moveDetails = looseMoves.find((m) => isMoveMatch(cleanedInput, m));
-
         if (kingPiece) game.put(kingPiece, myKingPos);
       }
 
@@ -213,7 +213,6 @@ export async function POST(req: Request) {
           game.put(piece, moveDetails.to);
         }
 
-        // Handle Castling Manual
         if (moveDetails.flags.includes("k")) {
           const rook = game.remove((team === "w" ? "h1" : "h8") as Square);
           if (rook) game.put(rook, (team === "w" ? "f1" : "f8") as Square);

@@ -381,7 +381,7 @@ export default function GamePage({
                   SPAM<span className="text-emerald-500">CHESS</span>
                 </h1>
                 <p className="text-slate-400 font-mono text-xs tracking-[0.2em] uppercase">
-                  Operation ID: {gameId}
+                  Game ID: {gameId}
                 </p>
               </div>
               <button
@@ -410,7 +410,7 @@ export default function GamePage({
                       WHITE
                     </h2>
                     <span className="bg-slate-300 text-slate-600 text-xs px-2 py-1 rounded font-mono font-bold">
-                      {whitePlayers.length} UNITS
+                      {whitePlayers.length} PLAYERS
                     </span>
                   </div>
                   <div className="flex-1 space-y-2 mb-8 min-h-[150px]">
@@ -429,7 +429,7 @@ export default function GamePage({
                     disabled={isJoining}
                     className="w-full bg-white text-slate-900 font-black py-4 rounded shadow-lg border-b-4 border-slate-300 active:border-b-0 active:translate-y-1 transition-all hover:bg-slate-50 uppercase tracking-widest"
                   >
-                    Initialize White
+                    Join White
                   </button>
                 </div>
               </div>
@@ -440,7 +440,7 @@ export default function GamePage({
                       BLACK
                     </h2>
                     <span className="bg-slate-900 border border-slate-800 text-slate-400 text-xs px-2 py-1 rounded font-mono font-bold">
-                      {blackPlayers.length} UNITS
+                      {blackPlayers.length} PLAYERS
                     </span>
                   </div>
                   <div className="flex-1 space-y-2 mb-8 min-h-[150px]">
@@ -459,7 +459,7 @@ export default function GamePage({
                     disabled={isJoining}
                     className="w-full bg-slate-800 text-white font-black py-4 rounded shadow-lg border-b-4 border-slate-700 active:border-b-0 active:translate-y-1 transition-all hover:bg-slate-700 uppercase tracking-widest"
                   >
-                    Initialize Black
+                    Join Black
                   </button>
                 </div>
               </div>
