@@ -37,3 +37,11 @@ export interface MoveResponse {
   isGameOver?: boolean;
   winner?: Team;
 }
+
+export interface MoveLog {
+  id: string; // Unique ID for React keys
+  move: string;
+  username: string;
+  team: Team;
+  timestamp: number;
+}
