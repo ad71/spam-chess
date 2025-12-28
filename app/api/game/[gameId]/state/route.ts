@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { Redis } from "@upstash/redis";
-import { GameInfo, GameStatus, Player } from "@/app/types";
+import { GameInfo, GameStatus, Player, Team } from "@/app/types";
 
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL!,
@@ -35,24 +35,25 @@ export async function GET(
     // Redis might return strings OR objects depending on client config.
     // We handle both cases to prevent crashes.
     const players: Player[] = (playersRaw || [])
-      .map((p: any) => {
+      .map((p: unknown) => {
         try {
           if (typeof p === "string") {
-            return JSON.parse(p);
+            return JSON.parse(p) as Player;
           }
-          return p; // It's already an object
+          // If Upstash automatically parsed it, treat it as a Player object
+          return p as Player;
         } catch (e) {
           console.error("Failed to parse player:", p);
           return null;
         }
       })
-      .filter((p): p is Player => p !== null); // Filter out any failed parses
+      .filter((p): p is Player => p !== null);
 
     const response: GameInfo = {
       gameId,
       fen,
       status: meta.status || "waiting",
-      winner: (meta.winner as any) || null, // Ensure winner is passed if it exists
+      winner: (meta.winner as Team) || null,
       players,
     };
 
