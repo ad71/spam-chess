@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, use, useRef } from "react";
-import { Chess } from "chess.js";
+import { Chess, Square, Piece } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import Pusher from "pusher-js";
 import { Team, GameInfo, Player, MoveLog } from "@/app/types";
@@ -32,6 +32,20 @@ function getMaterialBalance(fen: string) {
     }
   }
   return { white, black };
+}
+
+// Helper to find King for highlighting
+function findKingSquare(game: Chess, color: Team): Square | undefined {
+  const board = game.board();
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const piece = board[r][c];
+      if (piece && piece.type === "k" && piece.color === color) {
+        return piece.square;
+      }
+    }
+  }
+  return undefined;
 }
 
 export default function GamePage({
@@ -69,6 +83,9 @@ export default function GamePage({
   const [moveInput, setMoveInput] = useState("");
   const [copied, setCopied] = useState(false);
   const [isCoolingDown, setIsCoolingDown] = useState(false);
+  const [customSquares, setCustomSquares] = useState<
+    Record<string, React.CSSProperties>
+  >({});
 
   // Refs
   const inputRef = useRef<HTMLInputElement>(null);
@@ -77,6 +94,34 @@ export default function GamePage({
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [moveHistory]);
+
+  // Calculate Highlights (Check detection)
+  useEffect(() => {
+    const newSquares: Record<string, React.CSSProperties> = {};
+    const tempGame = new Chess(fen); // Use current FEN
+
+    // Check White King
+    const wKing = findKingSquare(tempGame, "w");
+    if (wKing && tempGame.isAttacked(wKing, "b")) {
+      newSquares[wKing] = {
+        background:
+          "radial-gradient(circle, rgba(255,0,0,0.8) 0%, transparent 70%)",
+        borderRadius: "50%",
+      };
+    }
+
+    // Check Black King
+    const bKing = findKingSquare(tempGame, "b");
+    if (bKing && tempGame.isAttacked(bKing, "w")) {
+      newSquares[bKing] = {
+        background:
+          "radial-gradient(circle, rgba(255,0,0,0.8) 0%, transparent 70%)",
+        borderRadius: "50%",
+      };
+    }
+
+    setCustomSquares(newSquares);
+  }, [fen]);
 
   // 1. Initial Fetch
   useEffect(() => {
@@ -213,25 +258,48 @@ export default function GamePage({
 
     const moveCommand = moveInput.trim();
 
-    // Optimistic Update
+    // 1. OPTIMISTIC UPDATE (With "Shadow Board" Bypass)
     const gameCopy = new Chess(fen);
     const fenParts = gameCopy.fen().split(" ");
     fenParts[1] = myTeam;
     const forcedGame = new Chess(fenParts.join(" "));
 
     let optimisticSuccess = false;
+
+    // Try Standard Move
     try {
       if (forcedGame.move(moveCommand)) {
-        setGame(forcedGame);
-        setFen(forcedGame.fen());
-        setMoveInput("");
         optimisticSuccess = true;
       }
     } catch (e) {
+      // Standard move failed. It might be because we are in check.
+      // Let's try the "Shadow Board" trick (Remove King -> Move -> Put King Back)
+      const myKingPos = findKingSquare(forcedGame, myTeam);
+
+      if (myKingPos) {
+        const kingPiece = forcedGame.remove(myKingPos);
+        try {
+          // Try move again without king
+          if (forcedGame.move(moveCommand)) {
+            optimisticSuccess = true;
+          }
+        } catch (err) {
+          // Still invalid
+        }
+        // Put king back for the visual
+        if (kingPiece) forcedGame.put(kingPiece, myKingPos);
+      }
+    }
+
+    if (!optimisticSuccess) {
+      // Visual shake?
       return;
     }
 
-    if (!optimisticSuccess) return;
+    // Apply the visual update
+    setGame(forcedGame);
+    setFen(forcedGame.fen());
+    setMoveInput("");
 
     setIsCoolingDown(true);
     setTimeout(() => {
@@ -286,19 +354,16 @@ export default function GamePage({
       if (total === 0) return [index, 50];
 
       const whiteRatio = pt.w / total;
+      // y=0 is TOP (White area). y=100 is BOTTOM.
+      // If White has 70% advantage (0.7), we want the White area to cover 70% of height.
+      // So the line should be at y = 100 - (0.7 * 100) = 30? No.
+      // SVG fills from Top (0). So we want line at y = 100 * (1 - ratio).
+      // If ratio 1.0 -> y = 0. (Wait, M 0,0 L 100,0 is flat top).
+      // Let's draw the WHITE area polygon.
+      // It starts at 0,0 (Top Left). Goes to 100,0 (Top Right).
+      // Then down to line points.
 
-      // FIXED LOGIC:
-      // y=0 is Top (SVG origin).
-      // We want White (Top) to grow down as ratio increases.
-      // So y coord of line = ratio * 100.
-      // Example: Ratio 0.5 -> y=50 (Middle).
-      // Example: Ratio 1.0 (All White) -> y=100 (Bottom). White fills whole box.
-      // Wait, standard fill draws from 0,0.
-      // Path M 0,0 ... L 100,0 closes at top.
-      // So this shape is the TOP shape (White).
-      // So if White has 100%, we want the shape to go to y=100.
-      const y = whiteRatio * 100;
-
+      const y = (1 - whiteRatio) * 100;
       const x = (index / (dataPoints.length - 1 || 1)) * 100;
       return [x, y];
     });
@@ -313,7 +378,6 @@ export default function GamePage({
 
     return (
       <div className="relative aspect-square w-full bg-[#111] border border-slate-800 overflow-hidden group rounded shadow-inner">
-        {/* Center Line (Equilibrium) */}
         <div className="absolute top-1/2 left-0 right-0 h-px bg-white/20 z-0 border-t border-dashed border-white/20"></div>
 
         <svg
@@ -321,10 +385,7 @@ export default function GamePage({
           preserveAspectRatio="none"
           className="absolute inset-0 w-full h-full z-10"
         >
-          {/* White Advantage Area (Solid White) */}
           <path d={pathD} fill="#ffffff" />
-
-          {/* The Frontier Line */}
           <path
             d={`M 0,${points[0][1]} ${points
               .map((p) => `L ${p[0]},${p[1]}`)
@@ -335,7 +396,6 @@ export default function GamePage({
           />
         </svg>
 
-        {/* Stats Overlay */}
         <div className="absolute bottom-2 left-2 flex flex-col font-mono text-[10px] font-bold z-20">
           <div className="bg-white text-black px-2 py-1 rounded-sm mb-1 shadow-lg w-fit border border-black">
             W: {current.w}
@@ -344,8 +404,6 @@ export default function GamePage({
             B: {current.b}
           </div>
         </div>
-
-        {/* Grid overlay for tech feel */}
         <div className="absolute inset-0 bg-[linear-gradient(rgba(0,0,0,0.1)_1px,transparent_1px),linear-gradient(90deg,rgba(0,0,0,0.1)_1px,transparent_1px)] bg-size-[20px_20px] pointer-events-none mix-blend-overlay"></div>
       </div>
     );
@@ -381,7 +439,7 @@ export default function GamePage({
                   SPAM<span className="text-emerald-500">CHESS</span>
                 </h1>
                 <p className="text-slate-400 font-mono text-xs tracking-[0.2em] uppercase">
-                  Game ID: {gameId}
+                  Operation ID: {gameId}
                 </p>
               </div>
               <button
@@ -410,7 +468,7 @@ export default function GamePage({
                       WHITE
                     </h2>
                     <span className="bg-slate-300 text-slate-600 text-xs px-2 py-1 rounded font-mono font-bold">
-                      {whitePlayers.length} PLAYERS
+                      {whitePlayers.length} UNITS
                     </span>
                   </div>
                   <div className="flex-1 space-y-2 mb-8 min-h-[150px]">
@@ -429,7 +487,7 @@ export default function GamePage({
                     disabled={isJoining}
                     className="w-full bg-white text-slate-900 font-black py-4 rounded shadow-lg border-b-4 border-slate-300 active:border-b-0 active:translate-y-1 transition-all hover:bg-slate-50 uppercase tracking-widest"
                   >
-                    Join White
+                    Initialize White
                   </button>
                 </div>
               </div>
@@ -440,7 +498,7 @@ export default function GamePage({
                       BLACK
                     </h2>
                     <span className="bg-slate-900 border border-slate-800 text-slate-400 text-xs px-2 py-1 rounded font-mono font-bold">
-                      {blackPlayers.length} PLAYERS
+                      {blackPlayers.length} UNITS
                     </span>
                   </div>
                   <div className="flex-1 space-y-2 mb-8 min-h-[150px]">
@@ -459,7 +517,7 @@ export default function GamePage({
                     disabled={isJoining}
                     className="w-full bg-slate-800 text-white font-black py-4 rounded shadow-lg border-b-4 border-slate-700 active:border-b-0 active:translate-y-1 transition-all hover:bg-slate-700 uppercase tracking-widest"
                   >
-                    Join Black
+                    Initialize Black
                   </button>
                 </div>
               </div>
@@ -551,6 +609,7 @@ export default function GamePage({
                 customLightSquareStyle={{ backgroundColor: "#475569" }}
                 animationDuration={200}
                 arePiecesDraggable={false}
+                customSquareStyles={customSquares}
               />
             </div>
           </div>
