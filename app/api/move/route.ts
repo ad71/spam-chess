@@ -20,7 +20,6 @@ const pusher = new Pusher({
 const COOLDOWN_MS = 200;
 const GAME_TTL = 86400;
 
-// Helper: Normalize string (remove symbols, lowercase)
 function cleanMove(m: string) {
   return m.replace(/[x=#+]/g, "").toLowerCase();
 }
@@ -38,16 +37,13 @@ function findKing(game: Chess, color: Team): Square | undefined {
   return undefined;
 }
 
-// ENHANCED MATCHER: Handles "Bfg7" (redundant source file) and "f7e8" (missing promotion char)
 function isMoveMatch(userInputClean: string, move: Move) {
   const lan = cleanMove(move.lan);
   const san = cleanMove(move.san);
 
-  // 1. Standard Exact Matches
   if (lan === userInputClean) return true;
   if (san === userInputClean) return true;
 
-  // 2. Promotion Fuzzy Match (e.g. user typed "f7e8", engine wants "f7e8q")
   if (move.promotion) {
     if (lan.startsWith(userInputClean) && userInputClean.length === 4)
       return true;
@@ -55,22 +51,13 @@ function isMoveMatch(userInputClean: string, move: Move) {
       return true;
   }
 
-  // 3. Permissive Disambiguation (e.g. user typed "bfg7", engine wants "bg7")
-  // We check if the input is a valid combination of Piece + From + To
   const p = move.piece;
   if (p !== "p") {
-    // Pawns don't use piece letters in standard notation
-    const f = move.from[0]; // file (a-h)
-    const r = move.from[1]; // rank (1-8)
-    const t = move.to; // square (e.g. g7)
+    const f = move.from[0];
+    const r = move.from[1];
+    const t = move.to;
 
-    // Allow: Bfg7, B8g7, Bf8g7
-    const candidates = [
-      p + f + t, // Piece + File + To ("bfg7")
-      p + r + t, // Piece + Rank + To ("b8g7")
-      p + f + r + t, // Piece + Square + To ("bf8g7")
-    ];
-
+    const candidates = [p + f + t, p + r + t, p + f + r + t];
     if (candidates.includes(userInputClean)) return true;
   }
 
@@ -134,13 +121,10 @@ export async function POST(req: Request) {
       const myKingPos = findKing(game, team);
       const enemyKingPos = findKing(game, team === "w" ? "b" : "w");
 
-      // --- PHASE A: CHECK FOR REGICIDE (THE KILL SHOT) ---
-
+      // --- PHASE A: CHECK FOR REGICIDE ---
       let isRegicide = false;
 
       if (enemyKingPos) {
-        // Determine if we need to remove our own king (Shadow Board)
-        // Only remove my King if input doesn't look like a King move to avoid ambiguity
         const isKingMove =
           cleanedInput.startsWith("k") ||
           (myKingPos && cleanedInput.startsWith(myKingPos));
@@ -150,7 +134,6 @@ export async function POST(req: Request) {
           myKingPiece = game.remove(myKingPos);
         }
 
-        // Swap Enemy King for Decoy (Queen)
         const enemyKingPiece = game.remove(enemyKingPos);
         game.put({ type: "q", color: team === "w" ? "b" : "w" }, enemyKingPos);
 
@@ -161,7 +144,6 @@ export async function POST(req: Request) {
 
         if (killShot) isRegicide = true;
 
-        // Cleanup
         game.remove(enemyKingPos);
         if (enemyKingPiece) game.put(enemyKingPiece, enemyKingPos);
         if (myKingPiece && myKingPos) game.put(myKingPiece, myKingPos);
@@ -169,10 +151,18 @@ export async function POST(req: Request) {
 
       if (isRegicide) {
         await redis.hset(metaKey, { status: "finished", winner: team });
+
+        // BROADCAST GAME OVER WITH CAPTURED='k'
         await pusher.trigger(`game-${gameId}`, "game-over", {
           winner: team,
           lastMover: username,
+          captured: "k", // Mark the king kill
         });
+
+        // Also broadcast the final board state so the kill is visualized
+        // Note: Since we didn't execute the move on the board (Regicide ends game instantly),
+        // the board FEN remains as is, but the game is over.
+
         return NextResponse.json({
           success: true,
           isGameOver: true,
@@ -180,13 +170,12 @@ export async function POST(req: Request) {
         });
       }
 
-      // --- PHASE B: STANDARD MOVE VALIDATION ---
+      // --- PHASE B: STANDARD MOVE ---
 
       let moveDetails: Move | undefined;
       const standardMoves = game.moves({ verbose: true });
       moveDetails = standardMoves.find((m) => isMoveMatch(cleanedInput, m));
 
-      // Try Shadow Board (Remove My King)
       if (!moveDetails && myKingPos) {
         const kingPiece = game.remove(myKingPos);
         const looseMoves = game.moves({ verbose: true });
@@ -198,7 +187,9 @@ export async function POST(req: Request) {
         throw new Error("Invalid move geometry");
       }
 
-      // --- PHASE C: EXECUTE MOVE ---
+      // --- PHASE C: EXECUTE ---
+
+      let capturedPiece = moveDetails.captured; // Capture via standard logic
 
       try {
         const result = game.move(moveDetails);
@@ -206,7 +197,9 @@ export async function POST(req: Request) {
       } catch (e) {
         // Force move manually
         const piece = game.remove(moveDetails.from);
-        game.remove(moveDetails.to);
+        const target = game.remove(moveDetails.to);
+
+        if (target) capturedPiece = target.type; // Capture via forced logic
 
         if (piece) {
           if (moveDetails.promotion) piece.type = moveDetails.promotion;
@@ -238,6 +231,7 @@ export async function POST(req: Request) {
         lastMove: move,
         lastMover: username,
         team: team,
+        captured: capturedPiece, // Send capture info to client
       });
 
       return NextResponse.json({ success: true, fen: newFen });

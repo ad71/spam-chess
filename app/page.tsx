@@ -50,8 +50,8 @@ export default function LandingPage() {
               </span>
             </h1>
             <div className="h-1 w-24 bg-emerald-500 mt-6 rounded-full opacity-50"></div>
-            <p className="mt-4 text-emerald-500/80 font-mono text-xs tracking-[0.3em] uppercase">
-              Real-Time Strategy
+            <p className="mt-10 text-emerald-500/80 font-mono text-xs tracking-[0.3em] uppercase">
+              Async Multiplayer Chess
             </p>
           </div>
 

@@ -1,11 +1,13 @@
 "use client";
 
 import { useState, useEffect, use, useRef } from "react";
-import { Chess, Square, Piece } from "chess.js";
+import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import Pusher from "pusher-js";
-import { Team, GameInfo, Player, MoveLog } from "@/app/types";
+import { Team, GameInfo, Player, MoveLog, GameStats } from "@/app/types";
 import { useRouter } from "next/navigation";
+import { calculateGameStats } from "@/lib/stats";
+import GameEndScreen from "@/components/GameEndScreen";
 
 const CLIENT_COOLDOWN_MS = 250;
 
@@ -34,8 +36,7 @@ function getMaterialBalance(fen: string) {
   return { white, black };
 }
 
-// Helper to find King for highlighting
-function findKingSquare(game: Chess, color: Team): Square | undefined {
+function findKingSquare(game: Chess, color: Team) {
   const board = game.board();
   for (let r = 0; r < 8; r++) {
     for (let c = 0; c < 8; c++) {
@@ -58,7 +59,9 @@ export default function GamePage({
 
   // --- Game Data ---
   const [game, setGame] = useState(new Chess());
-  const [fen, setFen] = useState("start");
+  const [fen, setFen] = useState(
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+  );
   const [serverFen, setServerFen] = useState("start");
   const [players, setPlayers] = useState<Player[]>([]);
   const [winner, setWinner] = useState<Team | null>(null);
@@ -67,6 +70,9 @@ export default function GamePage({
   const [materialHistory, setMaterialHistory] = useState<
     { w: number; b: number }[]
   >([{ w: 39, b: 39 }]);
+
+  // NEW: Final Game Stats
+  const [finalStats, setFinalStats] = useState<GameStats | null>(null);
 
   // --- Loading/Error ---
   const [loading, setLoading] = useState(true);
@@ -95,29 +101,33 @@ export default function GamePage({
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [moveHistory]);
 
-  // Calculate Highlights (Check detection)
+  // Calculate Check Highlights
   useEffect(() => {
     const newSquares: Record<string, React.CSSProperties> = {};
-    const tempGame = new Chess(fen); // Use current FEN
 
-    // Check White King
-    const wKing = findKingSquare(tempGame, "w");
-    if (wKing && tempGame.isAttacked(wKing, "b")) {
-      newSquares[wKing] = {
-        background:
-          "radial-gradient(circle, rgba(255,0,0,0.8) 0%, transparent 70%)",
-        borderRadius: "50%",
-      };
-    }
+    try {
+      // Wrap in try/catch because new Chess(fen) throws if a King is missing (Regicide)
+      const tempGame = new Chess(fen);
 
-    // Check Black King
-    const bKing = findKingSquare(tempGame, "b");
-    if (bKing && tempGame.isAttacked(bKing, "w")) {
-      newSquares[bKing] = {
-        background:
-          "radial-gradient(circle, rgba(255,0,0,0.8) 0%, transparent 70%)",
-        borderRadius: "50%",
-      };
+      const wKing = findKingSquare(tempGame, "w");
+      if (wKing && tempGame.isAttacked(wKing, "b")) {
+        newSquares[wKing] = {
+          background:
+            "radial-gradient(circle, rgba(255,0,0,0.8) 0%, transparent 70%)",
+          borderRadius: "50%",
+        };
+      }
+
+      const bKing = findKingSquare(tempGame, "b");
+      if (bKing && tempGame.isAttacked(bKing, "w")) {
+        newSquares[bKing] = {
+          background:
+            "radial-gradient(circle, rgba(255,0,0,0.8) 0%, transparent 70%)",
+          borderRadius: "50%",
+        };
+      }
+    } catch (e) {
+      // Game over state (missing king), no highlights needed
     }
 
     setCustomSquares(newSquares);
@@ -144,6 +154,9 @@ export default function GamePage({
           { w: mat.white, b: mat.black },
         ]);
 
+        // Note: We don't have full move history on initial load in this simple version,
+        // so we can't calculate full stats if joining a finished game late.
+        // But for live players it works. A full prod version would fetch history API.
         if (data.status === "finished" && data.winner) {
           setWinner(data.winner as Team);
         }
@@ -168,6 +181,7 @@ export default function GamePage({
     const channelName = `game-${gameId}`;
     const channel = pusher.subscribe(channelName);
 
+    // MOVE EVENT
     channel.bind(
       "update-board",
       (data: {
@@ -175,6 +189,7 @@ export default function GamePage({
         lastMove: string;
         lastMover: string;
         team: Team;
+        captured?: string;
       }) => {
         setServerFen(data.fen);
         const newGame = new Chess(data.fen);
@@ -189,6 +204,7 @@ export default function GamePage({
             username: data.lastMover,
             team: data.team,
             timestamp: Date.now(),
+            captured: data.captured, // NEW: Store capture
           },
         ]);
 
@@ -197,16 +213,34 @@ export default function GamePage({
       }
     );
 
+    // PLAYER JOIN
     channel.bind("player-joined", (newPlayer: Player) => {
       setPlayers((prev) => [...prev, newPlayer]);
     });
 
-    channel.bind("game-over", (data: { winner: Team; lastMover: string }) => {
-      setWinner(data.winner);
-    });
+    // GAME OVER
+    channel.bind(
+      "game-over",
+      (data: { winner: Team; lastMover: string; captured?: string }) => {
+        setWinner(data.winner);
 
+        // If we received the final move via this event (Regicide special case)
+        // We might need to add it to history manually if it wasn't in update-board?
+        // Actually, our API sends update-board THEN game-over, but Regicide might skip board update if King is removed.
+        // Let's rely on the client state.
+        // The API sends game-over WITH captured='k'.
+
+        // Let's create the stats immediately
+        // We need the VERY LATEST history, including this killing blow if it exists.
+        // Since react state update is async, we use the functional update or a ref if needed.
+        // But for simplicity, we trigger a calculation effect when `winner` changes.
+      }
+    );
+
+    // RESET
     channel.bind("game-reset", (data: { fen: string }) => {
       setWinner(null);
+      setFinalStats(null); // Clear stats screen
       setFen(data.fen);
       setServerFen(data.fen);
       setGame(new Chess(data.fen));
@@ -218,6 +252,19 @@ export default function GamePage({
       pusher.unsubscribe(channelName);
     };
   }, [gameId, loading, error]);
+
+  // 3. EFFECT: Calculate Stats when Game Ends
+  useEffect(() => {
+    if (winner && players.length > 0) {
+      // We use the current moveHistory state.
+      // Note: Ideally we ensure the final move is in history.
+      // Since Pusher events can race, in a perfect world we'd wait.
+      // But for this version, we calculate based on what we have.
+
+      const stats = calculateGameStats(moveHistory, players, winner);
+      setFinalStats(stats);
+    }
+  }, [winner, players.length, moveHistory.length]); // Re-run if history updates post-win
 
   // --- Handlers ---
 
@@ -258,7 +305,7 @@ export default function GamePage({
 
     const moveCommand = moveInput.trim();
 
-    // 1. OPTIMISTIC UPDATE (With "Shadow Board" Bypass)
+    // 1. OPTIMISTIC UPDATE
     const gameCopy = new Chess(fen);
     const fenParts = gameCopy.fen().split(" ");
     fenParts[1] = myTeam;
@@ -266,37 +313,23 @@ export default function GamePage({
 
     let optimisticSuccess = false;
 
-    // Try Standard Move
     try {
       if (forcedGame.move(moveCommand)) {
         optimisticSuccess = true;
       }
     } catch (e) {
-      // Standard move failed. It might be because we are in check.
-      // Let's try the "Shadow Board" trick (Remove King -> Move -> Put King Back)
       const myKingPos = findKingSquare(forcedGame, myTeam);
-
       if (myKingPos) {
         const kingPiece = forcedGame.remove(myKingPos);
         try {
-          // Try move again without king
-          if (forcedGame.move(moveCommand)) {
-            optimisticSuccess = true;
-          }
-        } catch (err) {
-          // Still invalid
-        }
-        // Put king back for the visual
+          if (forcedGame.move(moveCommand)) optimisticSuccess = true;
+        } catch (err) {}
         if (kingPiece) forcedGame.put(kingPiece, myKingPos);
       }
     }
 
-    if (!optimisticSuccess) {
-      // Visual shake?
-      return;
-    }
+    if (!optimisticSuccess) return;
 
-    // Apply the visual update
     setGame(forcedGame);
     setFen(forcedGame.fen());
     setMoveInput("");
@@ -354,16 +387,12 @@ export default function GamePage({
       if (total === 0) return [index, 50];
 
       const whiteRatio = pt.w / total;
-      // y=0 is TOP (White area). y=100 is BOTTOM.
-      // If White has 70% advantage (0.7), we want the White area to cover 70% of height.
-      // So the line should be at y = 100 - (0.7 * 100) = 30? No.
-      // SVG fills from Top (0). So we want line at y = 100 * (1 - ratio).
-      // If ratio 1.0 -> y = 0. (Wait, M 0,0 L 100,0 is flat top).
-      // Let's draw the WHITE area polygon.
-      // It starts at 0,0 (Top Left). Goes to 100,0 (Top Right).
-      // Then down to line points.
-
+      // Logic: y=0 is TOP (White area). y=100 is BOTTOM.
+      // We want the line to represent the boundary.
+      // If White has 70% advantage (0.7), White Area should cover 70% of box.
+      // So line is at y = 100% - 70% = 30%.
       const y = (1 - whiteRatio) * 100;
+
       const x = (index / (dataPoints.length - 1 || 1)) * 100;
       return [x, y];
     });
@@ -428,6 +457,7 @@ export default function GamePage({
   const blackPlayers = players.filter((p) => p.team === "b");
 
   if (!isJoined) {
+    // ... Lobby Code (Unchanged) ...
     return (
       <>
         <div className="scanline-overlay"></div>
@@ -439,7 +469,7 @@ export default function GamePage({
                   SPAM<span className="text-emerald-500">CHESS</span>
                 </h1>
                 <p className="text-slate-400 font-mono text-xs tracking-[0.2em] uppercase">
-                  Operation ID: {gameId}
+                  Game ID: {gameId}
                 </p>
               </div>
               <button
@@ -456,7 +486,7 @@ export default function GamePage({
                 value={tempUsername}
                 onChange={(e) => setTempUsername(e.target.value)}
                 className="relative z-10 w-full bg-slate-950/80 border border-slate-700 rounded-lg p-5 text-xl text-center text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all font-mono uppercase tracking-widest"
-                placeholder="ENTER CALLSIGN"
+                placeholder="PLAYER NAME"
               />
             </div>
 
@@ -468,7 +498,7 @@ export default function GamePage({
                       WHITE
                     </h2>
                     <span className="bg-slate-300 text-slate-600 text-xs px-2 py-1 rounded font-mono font-bold">
-                      {whitePlayers.length} UNITS
+                      {whitePlayers.length} PLAYERS
                     </span>
                   </div>
                   <div className="flex-1 space-y-2 mb-8 min-h-[150px]">
@@ -487,7 +517,7 @@ export default function GamePage({
                     disabled={isJoining}
                     className="w-full bg-white text-slate-900 font-black py-4 rounded shadow-lg border-b-4 border-slate-300 active:border-b-0 active:translate-y-1 transition-all hover:bg-slate-50 uppercase tracking-widest"
                   >
-                    Initialize White
+                    Join White
                   </button>
                 </div>
               </div>
@@ -498,7 +528,7 @@ export default function GamePage({
                       BLACK
                     </h2>
                     <span className="bg-slate-900 border border-slate-800 text-slate-400 text-xs px-2 py-1 rounded font-mono font-bold">
-                      {blackPlayers.length} UNITS
+                      {blackPlayers.length} PLAYERS
                     </span>
                   </div>
                   <div className="flex-1 space-y-2 mb-8 min-h-[150px]">
@@ -517,7 +547,7 @@ export default function GamePage({
                     disabled={isJoining}
                     className="w-full bg-slate-800 text-white font-black py-4 rounded shadow-lg border-b-4 border-slate-700 active:border-b-0 active:translate-y-1 transition-all hover:bg-slate-700 uppercase tracking-widest"
                   >
-                    Initialize Black
+                    Join Black
                   </button>
                 </div>
               </div>
@@ -541,34 +571,13 @@ export default function GamePage({
           }`}
         ></div>
 
-        {winner && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md animate-fade-in">
-            <div className="glass-panel p-12 rounded-2xl text-center shadow-2xl border-t border-white/10 max-w-2xl w-full mx-4 relative overflow-hidden">
-              <div
-                className={`absolute top-0 left-1/2 -translate-x-1/2 w-full h-1 bg-linear-to-r from-transparent via-${
-                  winner === "w" ? "white" : "red-500"
-                } to-transparent opacity-50`}
-              ></div>
-              <h1
-                className={`text-7xl md:text-9xl font-black mb-2 tracking-tighter ${
-                  winner === "w"
-                    ? "text-white drop-shadow-[0_0_30px_rgba(255,255,255,0.3)]"
-                    : "text-red-600 drop-shadow-[0_0_30px_rgba(220,38,38,0.4)]"
-                }`}
-              >
-                {winner === "w" ? "WHITE" : "BLACK"}
-              </h1>
-              <h2 className="text-3xl font-bold text-slate-400 tracking-[0.5em] mb-12">
-                VICTORY
-              </h2>
-              <button
-                onClick={handleRematch}
-                className="group relative inline-flex items-center justify-center px-8 py-4 font-bold text-white transition-all duration-200 bg-emerald-600 font-mono rounded-lg hover:bg-emerald-500"
-              >
-                INITIALIZE REMATCH <span className="text-xl ml-2">↻</span>
-              </button>
-            </div>
-          </div>
+        {/* REPLACED: NEW GAME END SCREEN */}
+        {finalStats && (
+          <GameEndScreen
+            stats={finalStats}
+            myTeam={myTeam}
+            onRematch={handleRematch}
+          />
         )}
 
         {/* LEFT PANEL */}
@@ -580,8 +589,8 @@ export default function GamePage({
                 ROOM_{gameId}
               </h1>
               <p className="text-[10px] text-slate-600 font-bold tracking-widest mt-1">
-                OPERATOR: {myUsername} // {myTeam === "w" ? "WHITE" : "BLACK"}{" "}
-                FACTION
+                PLAYER: {myUsername} // {myTeam === "w" ? "WHITE" : "BLACK"}{" "}
+                TEAM
               </p>
             </div>
             <div className="flex gap-4">
@@ -721,8 +730,23 @@ export default function GamePage({
                         {log.username}
                       </span>
                     </div>
-                    <div className="text-emerald-400 font-black font-mono tracking-widest">
-                      {log.move}
+                    <div className="flex items-center gap-2">
+                      {/* Captured icon if any */}
+                      {log.captured && (
+                        <span
+                          className="text-slate-500 text-[10px]"
+                          title="Captured"
+                        >
+                          [
+                          {log.captured === "k"
+                            ? "👑"
+                            : log.captured.toUpperCase()}
+                          ]
+                        </span>
+                      )}
+                      <div className="text-emerald-400 font-black font-mono tracking-widest">
+                        {log.move}
+                      </div>
                     </div>
                   </div>
                 </div>

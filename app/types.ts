@@ -7,11 +7,20 @@ export interface Player {
   joinedAt: number;
 }
 
+export interface MoveLog {
+  id: string;
+  move: string;
+  username: string;
+  team: Team;
+  timestamp: number;
+  captured?: string;
+}
+
 export interface GameInfo {
   gameId: string;
   fen: string;
   status: GameStatus;
-  winner?: Team | null; // New field
+  winner?: Team | null;
   players: Player[];
   lastMove?: string;
   lastMover?: string;
@@ -36,12 +45,25 @@ export interface MoveResponse {
   message?: string;
   isGameOver?: boolean;
   winner?: Team;
+  captured?: string;
 }
 
-export interface MoveLog {
-  id: string; // Unique ID for React keys
-  move: string;
+export interface PlayerStat {
   username: string;
   team: Team;
-  timestamp: number;
+  rank: number;
+  moves: number; // Total moves made
+  score: number; // Material value captured
+  kills: string[]; // List of captured pieces (e.g. ['p', 'n', 'q'])
+  badges: Badge[]; // Awards
+}
+
+export type Badge = "KINGSLAYER" | "MVP" | "SPRINTER" | "PACIFIST";
+
+export interface GameStats {
+  winner: Team;
+  whiteStats: PlayerStat[];
+  blackStats: PlayerStat[];
+  totalWhiteScore: number;
+  totalBlackScore: number;
 }
