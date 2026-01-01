@@ -7,14 +7,13 @@ import {
   Badge,
 } from "@/app/types";
 
-// Point values for captures
 const POINTS: Record<string, number> = {
-  p: 1, // Pawn
-  n: 3, // Knight
-  b: 3, // Bishop
-  r: 5, // Rook
-  q: 9, // Queen
-  k: 100, // The King (Huge bonus for the kill)
+  p: 1,
+  n: 3,
+  b: 3,
+  r: 5,
+  q: 9,
+  k: 25, // king = massive value
 };
 
 export function calculateGameStats(
@@ -22,9 +21,9 @@ export function calculateGameStats(
   players: Player[],
   winner: Team
 ): GameStats {
-  // 1. Initialize Stats Map for all players (even those who did nothing)
   const statsMap = new Map<string, PlayerStat>();
 
+  // 1. Initialize
   players.forEach((p) => {
     statsMap.set(p.username, {
       username: p.username,
@@ -38,18 +37,15 @@ export function calculateGameStats(
   });
 
   // 2. Process History
-  let maxScore = -1;
-  let maxMoves = -1;
   let kingslayerName: string | null = null;
 
   history.forEach((log) => {
-    // If this log entry denotes the King capture, mark the Kingslayer
     if (log.captured === "k") {
       kingslayerName = log.username;
     }
 
     const stat = statsMap.get(log.username);
-    if (!stat) return; // Should not happen unless player left
+    if (!stat) return;
 
     stat.moves += 1;
 
@@ -59,53 +55,83 @@ export function calculateGameStats(
     }
   });
 
-  // 3. Assign Badges & Calculate Maxima
-  // We do a first pass to find max values
-  statsMap.forEach((stat) => {
-    if (stat.score > maxScore) maxScore = stat.score;
-    if (stat.moves > maxMoves) maxMoves = stat.moves;
-  });
-
-  // 4. Finalize Badges
-  statsMap.forEach((stat) => {
-    // KINGSLAYER
-    if (stat.username === kingslayerName) {
-      stat.badges.push("KINGSLAYER");
-    }
-
-    // MVP (Highest Score - must have > 0)
-    if (stat.score === maxScore && stat.score > 0) {
-      stat.badges.push("MVP");
-    }
-
-    // SPRINTER (Most Moves - must have > 0)
-    if (stat.moves === maxMoves && stat.moves > 5) {
-      stat.badges.push("SPRINTER");
-    }
-
-    // PACIFIST (Many moves, no kills)
-    if (stat.moves > 10 && stat.score === 0) {
-      stat.badges.push("PACIFIST");
-    }
-  });
-
-  // 5. Sort and Split by Team
+  // 3. Separate Teams & Sort (Initial sort for ranking)
+  // Sort by Score DESC, then Moves ASC (Efficiency)
   const allStats = Array.from(statsMap.values());
 
-  // Helper to sort: Score DESC, then Moves DESC
   const sortFn = (a: PlayerStat, b: PlayerStat) => {
     if (b.score !== a.score) return b.score - a.score;
-    return b.moves - a.moves;
+    return a.moves - b.moves; // Fewer moves = better if scores tied
   };
 
   const whiteStats = allStats.filter((s) => s.team === "w").sort(sortFn);
   const blackStats = allStats.filter((s) => s.team === "b").sort(sortFn);
 
+  // 4. Assign Badges
+  // We process per-team logic
+  [whiteStats, blackStats].forEach((teamStats) => {
+    const isWinnerTeam = teamStats.length > 0 && teamStats[0].team === winner;
+
+    // Calculate Team Maxes
+    let maxMoves = -1;
+    teamStats.forEach((s) => {
+      if (s.moves > maxMoves) maxMoves = s.moves;
+    });
+
+    teamStats.forEach((stat, index) => {
+      // KINGSLAYER
+      if (stat.username === kingslayerName) {
+        stat.badges.push("KINGSLAYER");
+      }
+
+      // MVP (Winner Only, Top Rank)
+      if (isWinnerTeam && index === 0 && stat.score > 0) {
+        stat.badges.push("MVP");
+      }
+
+      // WARLORD (Loser Only, Top Rank, High Score)
+      if (!isWinnerTeam && index === 0 && stat.score > 10) {
+        stat.badges.push("WARLORD"); // Changed from MVP for loser
+      }
+
+      // SPRINTER (Most moves on team, must be active)
+      if (stat.moves === maxMoves && stat.moves > 5) {
+        // Avoid duplicate if they already have MVP/Warlord to keep it clean?
+        // Nah, multiple badges are fun.
+        stat.badges.push("SPRINTER");
+      }
+
+      // SNIPER (High efficiency: High score, low moves)
+      if (stat.score >= 9 && stat.moves < 10) {
+        stat.badges.push("SNIPER");
+      }
+
+      // PACIFIST (Many moves, 0 score)
+      if (stat.moves > 8 && stat.score === 0) {
+        stat.badges.push("PACIFIST");
+      }
+
+      // BRICK (The "Useless" Roast - Moderate moves, 0 score)
+      // Rare: 10% chance to trigger if criteria met to keep it funny/rare
+      if (
+        stat.moves > 5 &&
+        stat.score === 0 &&
+        !stat.badges.includes("PACIFIST")
+      ) {
+        if (Math.random() > 0.8) stat.badges.push("BRICK");
+      }
+
+      // GHOST (Joined but did almost nothing)
+      if (stat.moves < 2) {
+        stat.badges.push("GHOST");
+      }
+    });
+  });
+
   // Assign Ranks
   whiteStats.forEach((s, i) => (s.rank = i + 1));
   blackStats.forEach((s, i) => (s.rank = i + 1));
 
-  // Totals
   const totalWhiteScore = whiteStats.reduce((sum, s) => sum + s.score, 0);
   const totalBlackScore = blackStats.reduce((sum, s) => sum + s.score, 0);
 

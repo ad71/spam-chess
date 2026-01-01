@@ -58,7 +58,15 @@ export interface PlayerStat {
   badges: Badge[]; // Awards
 }
 
-export type Badge = "KINGSLAYER" | "MVP" | "SPRINTER" | "PACIFIST";
+export type Badge =
+  | "KINGSLAYER"
+  | "MVP"
+  | "WARLORD"
+  | "SPRINTER"
+  | "PACIFIST"
+  | "GHOST"
+  | "SNIPER"
+  | "BRICK";
 
 export interface GameStats {
   winner: Team;

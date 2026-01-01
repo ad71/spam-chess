@@ -93,6 +93,25 @@ export default function GamePage({
     Record<string, React.CSSProperties>
   >({});
 
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [isShaking, setIsShaking] = useState(false);
+
+  // Countdown Timer Logic
+  useEffect(() => {
+    if (countdown !== null && countdown > 0) {
+      const timer = setTimeout(() => setCountdown(countdown - 1), 1000);
+      return () => clearTimeout(timer);
+    } else if (countdown === 0) {
+      setCountdown(null); // Release the lock
+    }
+  }, [countdown]);
+
+  // Shake Helper
+  const triggerShake = () => {
+    setIsShaking(true);
+    setTimeout(() => setIsShaking(false), 500);
+  };
+
   // Refs
   const inputRef = useRef<HTMLInputElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -204,7 +223,7 @@ export default function GamePage({
             username: data.lastMover,
             team: data.team,
             timestamp: Date.now(),
-            captured: data.captured, // NEW: Store capture
+            captured: data.captured,
           },
         ]);
 
@@ -218,41 +237,45 @@ export default function GamePage({
       setPlayers((prev) => [...prev, newPlayer]);
     });
 
-    // GAME OVER
+    // GAME OVER - FIXED: Adds the killing blow to history
     channel.bind(
       "game-over",
       (data: { winner: Team; lastMover: string; captured?: string }) => {
+        // If Regicide occurred, record the final move for stats
+        if (data.captured === "k") {
+          setMoveHistory((prev) => [
+            ...prev,
+            {
+              id: "killing-blow",
+              move: "REGICIDE", // Placeholder text since API doesn't send move string on win
+              username: data.lastMover,
+              team: data.winner,
+              timestamp: Date.now(),
+              captured: "k",
+            },
+          ]);
+        }
+
         setWinner(data.winner);
-
-        // If we received the final move via this event (Regicide special case)
-        // We might need to add it to history manually if it wasn't in update-board?
-        // Actually, our API sends update-board THEN game-over, but Regicide might skip board update if King is removed.
-        // Let's rely on the client state.
-        // The API sends game-over WITH captured='k'.
-
-        // Let's create the stats immediately
-        // We need the VERY LATEST history, including this killing blow if it exists.
-        // Since react state update is async, we use the functional update or a ref if needed.
-        // But for simplicity, we trigger a calculation effect when `winner` changes.
       }
     );
 
-    // RESET
+    // RESET - FIXED: Triggers 3s Countdown
     channel.bind("game-reset", (data: { fen: string }) => {
       setWinner(null);
-      setFinalStats(null); // Clear stats screen
+      setFinalStats(null);
       setFen(data.fen);
       setServerFen(data.fen);
       setGame(new Chess(data.fen));
       setMoveHistory([]);
       setMaterialHistory([{ w: 39, b: 39 }]);
+      setCountdown(3); // Start Countdown
     });
 
     return () => {
       pusher.unsubscribe(channelName);
     };
   }, [gameId, loading, error]);
-
   // 3. EFFECT: Calculate Stats when Game Ends
   useEffect(() => {
     if (winner && players.length > 0) {
@@ -298,9 +321,34 @@ export default function GamePage({
     }
   };
 
+  const handleResync = async () => {
+    try {
+      const res = await fetch(`/api/game/${gameId}/state`);
+      if (res.ok) {
+        const data: GameInfo = await res.json();
+        const newGame = new Chess(data.fen);
+        setGame(newGame);
+        setFen(data.fen);
+        setServerFen(data.fen);
+        // Note: We don't overwrite history/players here to avoid flicker, just the board state
+      }
+    } catch (e) {
+      console.error("Resync failed");
+    }
+  };
+
   const handleMove = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isCoolingDown || !moveInput.trim() || !myTeam || !myUsername || winner)
+
+    // block input during 3s Countdown
+    if (
+      countdown !== null ||
+      isCoolingDown ||
+      !moveInput.trim() ||
+      !myTeam ||
+      !myUsername ||
+      winner
+    )
       return;
 
     const moveCommand = moveInput.trim();
@@ -328,7 +376,10 @@ export default function GamePage({
       }
     }
 
-    if (!optimisticSuccess) return;
+    if (!optimisticSuccess) {
+      triggerShake(); // UPDATED: Visual feedback
+      return;
+    }
 
     setGame(forcedGame);
     setFen(forcedGame.fen());
@@ -353,11 +404,13 @@ export default function GamePage({
       });
 
       if (!res.ok) {
+        triggerShake(); // UPDATED
         const safeGame = new Chess(serverFen);
         setGame(safeGame);
         setFen(serverFen);
       }
     } catch (err) {
+      triggerShake(); // UPDATED
       const safeGame = new Chess(serverFen);
       setGame(safeGame);
       setFen(serverFen);
@@ -587,6 +640,13 @@ export default function GamePage({
               <h1 className="text-xl font-bold text-slate-400 tracking-tight flex items-center gap-2">
                 <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
                 ROOM_{gameId}
+                <button
+                  onClick={handleResync}
+                  title="Hard Resync"
+                  className="ml-2 text-slate-600 hover:text-emerald-500 transition-colors"
+                >
+                  ↻
+                </button>
               </h1>
               <p className="text-[10px] text-slate-600 font-bold tracking-widest mt-1">
                 PLAYER: {myUsername} // {myTeam === "w" ? "WHITE" : "BLACK"}{" "}
@@ -603,7 +663,19 @@ export default function GamePage({
             </div>
           </div>
 
-          <div className="flex-1 flex items-center justify-center min-h-0">
+          <div className="flex-1 flex items-center justify-center min-h-0 relative">
+            {countdown !== null && (
+              <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm rounded-lg">
+                <div className="text-center">
+                  <div className="text-emerald-500 font-bold tracking-[0.5em] text-sm mb-4 animate-pulse">
+                    READY
+                  </div>
+                  <div className="text-9xl font-black text-white drop-shadow-[0_0_15px_rgba(255,255,255,0.5)]">
+                    {countdown}
+                  </div>
+                </div>
+              </div>
+            )}
             <div
               className={`aspect-square h-full max-h-full rounded-lg overflow-hidden shadow-2xl border-[3px] transition-all duration-500 ${
                 myTeam === "w"
@@ -624,26 +696,35 @@ export default function GamePage({
           </div>
 
           <div className="mt-6 w-full max-w-3xl mx-auto">
-            <form onSubmit={handleMove} className="flex gap-3 relative">
+            <form
+              onSubmit={handleMove}
+              className={`flex gap-3 relative ${
+                isShaking ? "animate-shake" : ""
+              }`}
+            >
               <div className="flex-1 relative group">
                 <input
                   ref={inputRef}
                   type="text"
                   className={`relative z-10 w-full bg-slate-900/90 border border-slate-700 rounded-lg px-5 py-4 text-xl font-mono text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all ${
-                    isCoolingDown ? "opacity-50" : ""
+                    isCoolingDown || countdown !== null ? "opacity-50" : ""
                   }`}
-                  placeholder={`CMD > (e.g. ${myTeam === "w" ? "e4" : "e5"})`}
+                  placeholder={
+                    countdown !== null
+                      ? "LOCKED..."
+                      : `CMD > (e.g. ${myTeam === "w" ? "e4" : "e5"})`
+                  }
                   value={moveInput}
                   onChange={(e) => setMoveInput(e.target.value)}
                   autoFocus
-                  disabled={!!winner || isCoolingDown}
+                  disabled={!!winner || isCoolingDown || countdown !== null}
                 />
               </div>
               <button
                 type="submit"
-                disabled={!!winner || isCoolingDown}
+                disabled={!!winner || isCoolingDown || countdown !== null}
                 className={`relative overflow-hidden font-black rounded-lg text-lg transition-all w-32 shadow-lg ${
-                  isCoolingDown
+                  isCoolingDown || countdown !== null
                     ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700"
                     : myTeam === "w"
                     ? "bg-slate-200 text-slate-900 hover:bg-white hover:scale-105 active:scale-95"
@@ -665,6 +746,34 @@ export default function GamePage({
             </form>
           </div>
         </div>
+
+        <style jsx>{`
+          @keyframes shrinkWidth {
+            from {
+              width: 100%;
+            }
+            to {
+              width: 0%;
+            }
+          }
+          @keyframes shake {
+            0%,
+            100% {
+              transform: translateX(0);
+            }
+            20%,
+            60% {
+              transform: translateX(-5px);
+            }
+            40%,
+            80% {
+              transform: translateX(5px);
+            }
+          }
+          .animate-shake {
+            animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+          }
+        `}</style>
 
         {/* RIGHT PANEL: SIDEBAR */}
         <div className="w-full md:w-96 lg:w-[450px] border-l border-slate-800 bg-slate-950/80 backdrop-blur-sm flex flex-col z-20">
