@@ -14,6 +14,7 @@ export interface MoveLog {
   team: Team;
   timestamp: number;
   captured?: string;
+  fen: string;
 }
 
 export interface GameInfo {

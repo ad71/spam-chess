@@ -13,7 +13,7 @@ const POINTS: Record<string, number> = {
   b: 3,
   r: 5,
   q: 9,
-  k: 25, // king = massive value
+  k: 15, // king = massive value
 };
 
 export function calculateGameStats(

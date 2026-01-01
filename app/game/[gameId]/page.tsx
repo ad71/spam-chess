@@ -62,7 +62,10 @@ export default function GamePage({
   const [fen, setFen] = useState(
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
   );
-  const [serverFen, setServerFen] = useState("start");
+  // Changed initial serverFen value for proper defaulting to standard board
+  const [serverFen, setServerFen] = useState(
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+  );
   const [players, setPlayers] = useState<Player[]>([]);
   const [winner, setWinner] = useState<Team | null>(null);
 
@@ -71,8 +74,11 @@ export default function GamePage({
     { w: number; b: number }[]
   >([{ w: 39, b: 39 }]);
 
-  // NEW: Final Game Stats
+  // Final Game Stats
   const [finalStats, setFinalStats] = useState<GameStats | null>(null);
+
+  // NEW: Frozen Move History for end screen (prevents replay from using new moves)
+  const [finalHistory, setFinalHistory] = useState<MoveLog[] | null>(null);
 
   // --- Loading/Error ---
   const [loading, setLoading] = useState(true);
@@ -210,25 +216,35 @@ export default function GamePage({
         team: Team;
         captured?: string;
       }) => {
-        setServerFen(data.fen);
-        const newGame = new Chess(data.fen);
-        setGame(newGame);
-        setFen(data.fen);
+        // Only update live history if game is NOT over - prevent race after the kill
+        setWinner((prevWinner) => {
+          if (prevWinner) return prevWinner;
+          setServerFen(data.fen);
+          const newGame = new Chess(data.fen);
+          setGame(newGame);
+          setFen(data.fen);
 
-        setMoveHistory((prev) => [
-          ...prev,
-          {
-            id: Math.random().toString(36).substr(2, 9),
-            move: data.lastMove,
-            username: data.lastMover,
-            team: data.team,
-            timestamp: Date.now(),
-            captured: data.captured,
-          },
-        ]);
+          setMoveHistory((prev) => [
+            ...prev,
+            {
+              id: Math.random().toString(36).substr(2, 9),
+              move: data.lastMove,
+              username: data.lastMover,
+              team: data.team,
+              timestamp: Date.now(),
+              captured: data.captured,
+              fen: data.fen,
+            },
+          ]);
 
-        const mat = getMaterialBalance(data.fen);
-        setMaterialHistory((prev) => [...prev, { w: mat.white, b: mat.black }]);
+          const mat = getMaterialBalance(data.fen);
+          setMaterialHistory((prev) => [
+            ...prev,
+            { w: mat.white, b: mat.black },
+          ]);
+
+          return null; // Don't change winner state here
+        });
       }
     );
 
@@ -237,57 +253,67 @@ export default function GamePage({
       setPlayers((prev) => [...prev, newPlayer]);
     });
 
-    // GAME OVER - FIXED: Adds the killing blow to history
+    // GAME OVER
     channel.bind(
       "game-over",
       (data: { winner: Team; lastMover: string; captured?: string }) => {
-        // If Regicide occurred, record the final move for stats
-        if (data.captured === "k") {
-          setMoveHistory((prev) => [
-            ...prev,
-            {
-              id: "killing-blow",
-              move: "REGICIDE", // Placeholder text since API doesn't send move string on win
-              username: data.lastMover,
-              team: data.winner,
-              timestamp: Date.now(),
-              captured: "k",
-            },
-          ]);
-        }
-
         setWinner(data.winner);
+
+        // CREATE THE FINAL HISTORY SNAPSHOT
+        setMoveHistory((prev) => {
+          const finalLog = {
+            id: "killing-blow",
+            move: "REGICIDE",
+            username: data.lastMover,
+            team: data.winner,
+            timestamp: Date.now(),
+            captured: "k",
+            fen: fen, // Pre-death FEN
+          };
+
+          const completeHistory = [...prev];
+          // Only add if not present, and if Regicide
+          if (
+            data.captured === "k" &&
+            prev[prev.length - 1]?.move !== "REGICIDE"
+          ) {
+            completeHistory.push(finalLog);
+          }
+
+          setFinalHistory(completeHistory); // Freeze snapshot
+          // Calculate stats now, with the complete/final history
+          const stats = calculateGameStats(
+            completeHistory,
+            players,
+            data.winner
+          );
+          setFinalStats(stats);
+
+          return completeHistory;
+        });
       }
     );
 
-    // RESET - FIXED: Triggers 3s Countdown
+    // RESET
     channel.bind("game-reset", (data: { fen: string }) => {
       setWinner(null);
       setFinalStats(null);
+      setFinalHistory(null); // Clear frozen history
       setFen(data.fen);
       setServerFen(data.fen);
       setGame(new Chess(data.fen));
       setMoveHistory([]);
       setMaterialHistory([{ w: 39, b: 39 }]);
-      setCountdown(3); // Start Countdown
+      setCountdown(3);
     });
 
     return () => {
       pusher.unsubscribe(channelName);
     };
-  }, [gameId, loading, error]);
-  // 3. EFFECT: Calculate Stats when Game Ends
-  useEffect(() => {
-    if (winner && players.length > 0) {
-      // We use the current moveHistory state.
-      // Note: Ideally we ensure the final move is in history.
-      // Since Pusher events can race, in a perfect world we'd wait.
-      // But for this version, we calculate based on what we have.
+  }, [gameId, loading, error, players, fen]);
 
-      const stats = calculateGameStats(moveHistory, players, winner);
-      setFinalStats(stats);
-    }
-  }, [winner, players.length, moveHistory.length]); // Re-run if history updates post-win
+  // REMOVED: The separate useEffect for calculating stats.
+  // We now calculate it directly in the game-over handler to ensure synchronization.
 
   // --- Handlers ---
 
@@ -625,10 +651,11 @@ export default function GamePage({
         ></div>
 
         {/* REPLACED: NEW GAME END SCREEN */}
-        {finalStats && (
+        {finalStats && finalHistory && (
           <GameEndScreen
             stats={finalStats}
             myTeam={myTeam}
+            history={finalHistory}
             onRematch={handleRematch}
           />
         )}
