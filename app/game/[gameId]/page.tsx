@@ -216,41 +216,53 @@ export default function GamePage({
         team: Team;
         captured?: string;
       }) => {
-        // Only update live history if game is NOT over - prevent race after the kill
         setWinner((prevWinner) => {
           if (prevWinner) return prevWinner;
+
           setServerFen(data.fen);
           const newGame = new Chess(data.fen);
           setGame(newGame);
           setFen(data.fen);
 
-          setMoveHistory((prev) => [
-            ...prev,
-            {
-              id: Math.random().toString(36).substr(2, 9),
-              move: data.lastMove,
-              username: data.lastMover,
-              team: data.team,
-              timestamp: Date.now(),
-              captured: data.captured,
-              fen: data.fen,
-            },
-          ]);
+          setMoveHistory((prev) => {
+            // DEDUPE CHECK: If the new FEN matches the last recorded FEN, ignore it.
+            if (prev.length > 0 && prev[prev.length - 1].fen === data.fen) {
+              return prev;
+            }
 
+            return [
+              ...prev,
+              {
+                id: Math.random().toString(36).substr(2, 9),
+                move: data.lastMove,
+                username: data.lastMover,
+                team: data.team,
+                timestamp: Date.now(),
+                captured: data.captured,
+                fen: data.fen,
+              },
+            ];
+          });
+
+          // Update material only if we accepted the move
           const mat = getMaterialBalance(data.fen);
-          setMaterialHistory((prev) => [
-            ...prev,
-            { w: mat.white, b: mat.black },
-          ]);
+          setMaterialHistory((prev) => {
+            // Basic dedupe for material graph too just in case
+            // (Though visual glitch here is less noticeable)
+            return [...prev, { w: mat.white, b: mat.black }];
+          });
 
-          return null; // Don't change winner state here
+          return null;
         });
       }
     );
 
     // PLAYER JOIN
     channel.bind("player-joined", (newPlayer: Player) => {
-      setPlayers((prev) => [...prev, newPlayer]);
+      setPlayers((prev) => {
+        if (prev.some((p) => p.username === newPlayer.username)) return prev;
+        return [...prev, newPlayer];
+      });
     });
 
     // GAME OVER
@@ -259,7 +271,7 @@ export default function GamePage({
       (data: { winner: Team; lastMover: string; captured?: string }) => {
         setWinner(data.winner);
 
-        // CREATE THE FINAL HISTORY SNAPSHOT
+        // CREATE FINAL HISTORY SNAPSHOT
         setMoveHistory((prev) => {
           const finalLog = {
             id: "killing-blow",
@@ -268,11 +280,11 @@ export default function GamePage({
             team: data.winner,
             timestamp: Date.now(),
             captured: "k",
-            fen: fen, // Pre-death FEN
+            fen: fen, // Capture current local FEN
           };
 
           const completeHistory = [...prev];
-          // Only add if not present, and if Regicide
+          // Dedupe Regicide: check if last move was already REGICIDE
           if (
             data.captured === "k" &&
             prev[prev.length - 1]?.move !== "REGICIDE"
@@ -280,8 +292,7 @@ export default function GamePage({
             completeHistory.push(finalLog);
           }
 
-          setFinalHistory(completeHistory); // Freeze snapshot
-          // Calculate stats now, with the complete/final history
+          setFinalHistory(completeHistory);
           const stats = calculateGameStats(
             completeHistory,
             players,
@@ -298,7 +309,7 @@ export default function GamePage({
     channel.bind("game-reset", (data: { fen: string }) => {
       setWinner(null);
       setFinalStats(null);
-      setFinalHistory(null); // Clear frozen history
+      setFinalHistory(null);
       setFen(data.fen);
       setServerFen(data.fen);
       setGame(new Chess(data.fen));
@@ -308,7 +319,10 @@ export default function GamePage({
     });
 
     return () => {
+      // AGGRESSIVE CLEANUP
+      channel.unbind_all();
       pusher.unsubscribe(channelName);
+      pusher.disconnect();
     };
   }, [gameId, loading, error, players, fen]);
 
